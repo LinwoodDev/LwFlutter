@@ -292,6 +292,13 @@ jobs:
             fi
           done
 
+      - name: Restore engine output cache
+        id: engine-cache
+        uses: actions/cache@v4
+        with:
+          path: flutter/engine/src/out/${{ matrix.engine_out }}
+          key: engine-${{ runner.os }}-${{ runner.arch }}-${{ matrix.engine_out }}-${{ needs.prepare.outputs.flutter_ref }}-${{ hashFiles('LwFlutter/patches/**/*.patch') }}
+
       - name: Add Flutter to PATH
         shell: bash
         run: |
@@ -320,7 +327,67 @@ jobs:
         working-directory: flutter
         run: gclient sync -D
 
+      - name: Add LwFlutter engine build configs
+        if: ${{ steps.engine-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        working-directory: flutter/engine/src/flutter
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp)"
+          jq '.builds += [
+            {
+              "cas_archive": false,
+              "drone_dimensions": ["os=Windows-10", "device_type=none"],
+              "gclient_variables": {
+                "download_android_deps": false,
+                "download_jdk": false
+              },
+              "gn": ["--windows", "--windows-cpu", "x64", "--runtime-mode", "release", "--target-dir", "windows_release_x64"],
+              "name": "windows/windows_release_x64",
+              "description": "Builds a release mode engine that targets Windows x64.",
+              "ninja": {"config": "windows_release_x64", "targets": []}
+            },
+            {
+              "cas_archive": false,
+              "drone_dimensions": ["os=Windows-10", "device_type=none"],
+              "gclient_variables": {
+                "download_android_deps": false,
+                "download_jdk": false
+              },
+              "gn": ["--windows", "--windows-cpu", "arm64", "--runtime-mode", "release", "--target-dir", "windows_release_arm64"],
+              "name": "windows/windows_release_arm64",
+              "description": "Builds a release mode engine that targets Windows arm64.",
+              "ninja": {"config": "windows_release_arm64", "targets": []}
+            },
+            {
+              "cas_archive": false,
+              "drone_dimensions": ["os=Linux", "device_type=none"],
+              "gclient_variables": {
+                "download_android_deps": false,
+                "download_jdk": false
+              },
+              "gn": ["--linux", "--linux-cpu", "x64", "--runtime-mode", "release", "--target-dir", "linux_release_x64"],
+              "name": "linux/linux_release_x64",
+              "description": "Builds a release mode engine that targets Linux x64.",
+              "ninja": {"config": "linux_release_x64", "targets": []}
+            },
+            {
+              "cas_archive": false,
+              "drone_dimensions": ["os=Linux", "device_type=none"],
+              "gclient_variables": {
+                "download_android_deps": false,
+                "download_jdk": false
+              },
+              "gn": ["--linux", "--linux-cpu", "arm64", "--runtime-mode", "release", "--target-dir", "linux_release_arm64"],
+              "name": "linux/linux_release_arm64",
+              "description": "Builds a release mode engine that targets Linux arm64.",
+              "ninja": {"config": "linux_release_arm64", "targets": []}
+            }
+          ]' ci/builders/local_engine.json > "$tmp"
+          mv "$tmp" ci/builders/local_engine.json
+
       - name: Build engine with engine_tool
+        if: ${{ steps.engine-cache.outputs.cache-hit != 'true' }}
         shell: bash
         working-directory: flutter/engine/src/flutter
         run: dart tools/engine_tool/bin/et.dart build --config ${{ matrix.engine_out }}
