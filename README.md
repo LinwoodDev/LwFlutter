@@ -5,7 +5,7 @@ Linwood's lightweight Flutter patch distribution.
 This repository does **not** ship a full Flutter SDK. It ships:
 
 - a base Flutter version in `flutter.version`
-- patch files or patch sources in `patches/`
+- patch files in `patches/`
 - optional prebuilt local-engine artifacts for platforms that need engine patches
 - a reusable setup action for Linwood Butterfly in `setup/action.yml`
 
@@ -34,7 +34,7 @@ LwFlutter/
 
 All materialized patch files are applied to the official Flutter checkout in sorted order.
 
-## Patch files and patch sources
+## Patch files
 
 You can commit patch files:
 
@@ -111,8 +111,8 @@ lwflutter-engine-linux_release_x64.zip    # only when Linux engine patches are p
   id: flutter
   uses: LinwoodDev/LwFlutter/setup@main
   with:
-    flutter-version: 3.35.7
-    platform: windows
+    flutter-version-file: pubspec.yaml
+    platforms: windows,linux
 
 - name: Build Butterfly
   working-directory: app
@@ -122,7 +122,9 @@ lwflutter-engine-linux_release_x64.zip    # only when Linux engine patches are p
     flutter build windows --release ${{ steps.flutter.outputs.local-engine-args }}
 ```
 
-If a matching LwFlutter release exists, patches are applied to official Flutter. If a matching engine artifact exists for the platform, local-engine args are emitted. Otherwise it falls back to official Flutter behavior.
+If a matching LwFlutter release exists, patches are applied to official Flutter. The setup action defaults `platforms` from the current runner OS, so on Windows and Linux runners it will automatically look for the matching local-engine artifact. You can also pass a comma-separated list like `windows,linux`. Otherwise it falls back to official Flutter behavior.
+
+If you use `flutter-version-file`, the Flutter version in that file must be an exact version, just like `subosito/flutter-action`.
 
 ## Local patch testing
 

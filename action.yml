@@ -3,14 +3,19 @@ description: Setup official Flutter, apply LwFlutter patches if available, and o
 
 inputs:
   flutter-version:
-    description: Official Flutter version to install, for example 3.35.7.
-    required: true
+    description: Exact official Flutter version to install, for example 3.35.7. Omit when using flutter-version-file.
+    required: false
+    default: ''
+  flutter-version-file:
+    description: Path to pubspec.yaml, .fvmrc, or .fvm/fvm_config.json for subosito/flutter-action.
+    required: false
+    default: ''
   channel:
     description: Official Flutter channel used by subosito/flutter-action.
     required: false
     default: stable
-  platform:
-    description: Platform for optional LwFlutter local engine, for example windows or linux. Other platforms fall back to patched/no-engine Flutter.
+  platforms:
+    description: Comma-separated list of platforms for optional LwFlutter local engine, for example windows,linux. If omitted, it defaults to the current runner OS.
     required: false
     default: ''
   repo:
@@ -21,7 +26,7 @@ inputs:
     description: Optional explicit LwFlutter release tag, for example v3.35.7-lw.1. If empty, the newest matching v<flutter-version>-lw.* release is used.
     required: false
     default: ''
-  prefer-lwflutter:
+  use-lwflutter:
     description: Try to apply LwFlutter patches when a matching release exists.
     required: false
     default: 'true'
@@ -56,12 +61,48 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Normalize Flutter inputs
+      id: flutter-inputs
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        flutter_version="${{ inputs.flutter-version }}"
+        flutter_version_file="${{ inputs.flutter-version-file }}"
+
+        if [ -n "$flutter_version_file" ]; then
+          flutter_version=""
+        fi
+
+        if [ -z "$flutter_version" ] && [ -z "$flutter_version_file" ]; then
+          echo "::error::Provide either flutter-version or flutter-version-file."
+          exit 1
+        fi
+
+        echo "flutter-version=$flutter_version" >> "$GITHUB_OUTPUT"
+        echo "flutter-version-file=$flutter_version_file" >> "$GITHUB_OUTPUT"
+
     - name: Setup official Flutter
       uses: subosito/flutter-action@v2
       with:
-        flutter-version: ${{ inputs.flutter-version }}
+        flutter-version: ${{ steps.flutter-inputs.outputs.flutter-version }}
+        flutter-version-file: ${{ steps.flutter-inputs.outputs.flutter-version-file }}
         channel: ${{ inputs.channel }}
         cache: ${{ inputs.cache }}
+
+    - name: Resolve Flutter version
+      id: flutter-version
+      shell: bash
+      run: |
+        set -euo pipefail
+        flutter_version="$(flutter --version | head -n 1 | awk '{print $2}' | tr -d '[:space:]')"
+
+        if [ -z "$flutter_version" ]; then
+          echo "::error::Could not determine the installed Flutter version"
+          exit 1
+        fi
+
+        echo "flutter-version=$flutter_version" >> "$GITHUB_OUTPUT"
 
     - name: Resolve platform engine asset
       id: engine
@@ -69,7 +110,45 @@ runs:
       run: |
         set -euo pipefail
 
-        platform="${{ inputs.platform }}"
+        runner_platform=""
+        case "${{ runner.os }}" in
+          Windows) runner_platform="windows" ;;
+          Linux) runner_platform="linux" ;;
+          macOS) runner_platform="macos" ;;
+          *) runner_platform="" ;;
+        esac
+
+        configured_platforms="${{ inputs.platforms }}"
+
+        if [ -z "$configured_platforms" ]; then
+          configured_platforms="$runner_platform"
+        fi
+
+        normalized_platforms=""
+        IFS=',; ' read -r -a platform_tokens <<< "$configured_platforms"
+        for token in "${platform_tokens[@]}"; do
+          token="${token,,}"
+          token="${token//[$'\t\r\n ']/}"
+          if [ -z "$token" ]; then
+            continue
+          fi
+
+          if [ -z "$normalized_platforms" ]; then
+            normalized_platforms="$token"
+          else
+            normalized_platforms="$normalized_platforms,$token"
+          fi
+        done
+
+        platform=""
+        if [ -n "$runner_platform" ] && [ -n "$normalized_platforms" ]; then
+          case ",$normalized_platforms," in
+            *,"$runner_platform",*)
+              platform="$runner_platform"
+              ;;
+          esac
+        fi
+
         case "$platform" in
           windows)
             engine_out="windows_release_x64"
@@ -82,6 +161,8 @@ runs:
             ;;
         esac
 
+        echo "platforms=$normalized_platforms" >> "$GITHUB_OUTPUT"
+        echo "platform=$platform" >> "$GITHUB_OUTPUT"
         echo "engine-out=$engine_out" >> "$GITHUB_OUTPUT"
         if [ -n "$engine_out" ]; then
           echo "engine-asset=lwflutter-engine-${engine_out}.zip" >> "$GITHUB_OUTPUT"
@@ -98,9 +179,9 @@ runs:
         set -euo pipefail
 
         repo="${{ inputs.repo }}"
-        prefer="${{ inputs.prefer-lwflutter }}"
+        prefer="${{ inputs.use-lwflutter }}"
         explicit="${{ inputs.lwflutter-version }}"
-        flutter_version="${{ inputs.flutter-version }}"
+        flutter_version="${{ steps.flutter-version.outputs.flutter-version }}"
         engine_asset="${{ steps.engine.outputs.engine-asset }}"
 
         echo "using-lwflutter=false" >> "$GITHUB_OUTPUT"
@@ -237,4 +318,7 @@ runs:
         echo "Using LwFlutter patches: ${{ steps.resolve.outputs.using-lwflutter }}"
         echo "Using local engine: ${{ steps.resolve.outputs.using-local-engine }}"
         echo "Resolved LwFlutter version: ${{ steps.resolve.outputs.lwflutter-version }}"
+        echo "Resolved Flutter version: ${{ steps.flutter-version.outputs.flutter-version }}"
+        echo "Resolved platform: ${{ steps.engine.outputs.platform }}"
+        echo "Configured platforms: ${{ steps.engine.outputs.platforms }}"
         flutter --version
