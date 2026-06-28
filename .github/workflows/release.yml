@@ -344,7 +344,7 @@ jobs:
                 "download_android_deps": false,
                 "download_jdk": false
               },
-              "gn": ["--windows", "--windows-cpu", "x64", "--runtime-mode", "release", "--target-dir", "windows_release_x64"],
+              "gn": ["--runtime-mode", "release", "--no-stripped", "--no-lto", "--xcode-symlinks", "--target-dir", "windows_release_x64"],
               "name": "windows/windows_release_x64",
               "description": "Builds a release mode engine that targets Windows x64.",
               "ninja": {"config": "windows_release_x64", "targets": []}
@@ -356,7 +356,7 @@ jobs:
                 "download_android_deps": false,
                 "download_jdk": false
               },
-              "gn": ["--windows", "--windows-cpu", "arm64", "--runtime-mode", "release", "--target-dir", "windows_release_arm64"],
+              "gn": ["--runtime-mode", "release", "--windows-cpu", "arm64", "--no-stripped", "--no-lto", "--xcode-symlinks", "--target-dir", "windows_release_arm64"],
               "name": "windows/windows_release_arm64",
               "description": "Builds a release mode engine that targets Windows arm64.",
               "ninja": {"config": "windows_release_arm64", "targets": []}
@@ -368,7 +368,7 @@ jobs:
                 "download_android_deps": false,
                 "download_jdk": false
               },
-              "gn": ["--linux", "--linux-cpu", "x64", "--runtime-mode", "release", "--target-dir", "linux_release_x64"],
+              "gn": ["--runtime-mode", "release", "--no-stripped", "--no-lto", "--xcode-symlinks", "--target-dir", "linux_release_x64"],
               "name": "linux/linux_release_x64",
               "description": "Builds a release mode engine that targets Linux x64.",
               "ninja": {"config": "linux_release_x64", "targets": []}
@@ -380,7 +380,7 @@ jobs:
                 "download_android_deps": false,
                 "download_jdk": false
               },
-              "gn": ["--linux", "--linux-cpu", "arm64", "--runtime-mode", "release", "--target-dir", "linux_release_arm64"],
+              "gn": ["--linux", "--linux-cpu", "arm64", "--runtime-mode", "release", "--no-stripped", "--no-lto", "--xcode-symlinks", "--target-dir", "linux_release_arm64"],
               "name": "linux/linux_release_arm64",
               "description": "Builds a release mode engine that targets Linux arm64.",
               "ninja": {"config": "linux_release_arm64", "targets": []}
