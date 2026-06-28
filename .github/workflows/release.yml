@@ -323,7 +323,7 @@ jobs:
       - name: Build engine with engine_tool
         shell: bash
         working-directory: flutter/engine/src/flutter
-        run: dart tools/engine_tool/bin/et.dart build ${{ matrix.engine_out }}
+        run: dart tools/engine_tool/bin/et.dart build --config ${{ matrix.engine_out }}
 
       - name: Zip engine output
         shell: bash
