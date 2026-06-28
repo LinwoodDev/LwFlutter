@@ -241,6 +241,8 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
+    env:
+      DEPOT_TOOLS_WIN_TOOLCHAIN: "0"
 
     steps:
       - name: Checkout LwFlutter
