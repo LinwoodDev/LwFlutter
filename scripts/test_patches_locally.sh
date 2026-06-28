@@ -117,7 +117,7 @@ fi
 for patch in "${patches[@]}"; do
   echo "Testing $patch"
   if grep -qE '^From [0-9a-f]{40} Mon Sep 17 00:00:00 2001$' "$patch"; then
-    git am --3way --keep-cr "$patch"
+    git am --3way --keep-cr --ignore-whitespace --no-gpg-sign "$patch"
   else
     git apply --3way "$patch"
   fi

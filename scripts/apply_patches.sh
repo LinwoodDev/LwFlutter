@@ -45,10 +45,10 @@ for patch in "${patches[@]}"; do
   echo "Applying $patch"
   if grep -qE '^From [0-9a-f]{40} Mon Sep 17 00:00:00 2001$' "$patch"; then
     if [ "$mode" = "check" ]; then
-      git am --3way --keep-cr "$patch"
+      git am --3way --keep-cr --ignore-whitespace --no-gpg-sign "$patch"
       git am --abort || true
     else
-      git am --3way --keep-cr "$patch"
+      git am --3way --keep-cr --ignore-whitespace --no-gpg-sign "$patch"
     fi
   else
     if [ "$mode" = "check" ]; then

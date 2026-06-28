@@ -83,8 +83,8 @@ Please include the LwFlutter release tag, the Flutter version, the platform, and
 You can create a tag manually:
 
 ```bash
-git tag v3.35.7-lw.1
-git push origin v3.35.7-lw.1
+git tag v3.35.7-lw.0
+git push origin v3.35.7-lw.0
 ```
 
 Or run the release workflow manually without entering a tag. It will generate the next tag automatically:

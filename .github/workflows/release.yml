@@ -42,7 +42,7 @@ jobs:
 
     steps:
       - name: Checkout LwFlutter
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve metadata
         id: meta
@@ -81,7 +81,7 @@ jobs:
               | head -n 1 || true)"
 
             if [ -z "$latest" ]; then
-              next=1
+              next=0
             else
               next=$((latest + 1))
             fi
@@ -165,7 +165,7 @@ jobs:
 
     steps:
       - name: Checkout LwFlutter
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Materialize patch sources
         shell: bash
@@ -238,12 +238,12 @@ jobs:
 
     steps:
       - name: Checkout LwFlutter
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: LwFlutter
 
       - name: Checkout official Flutter
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: flutter/flutter
           ref: ${{ needs.prepare.outputs.flutter_ref }}
@@ -280,7 +280,7 @@ jobs:
           for patch in "${patches[@]}"; do
             echo "Applying $patch"
             if grep -qE '^From [0-9a-f]{40} Mon Sep 17 00:00:00 2001$' "$patch"; then
-              git am --3way --keep-cr "$patch"
+              git am --3way --keep-cr --ignore-whitespace --no-gpg-sign "$patch"
             else
               git apply --3way "$patch"
             fi
@@ -302,10 +302,17 @@ jobs:
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
           echo "$GITHUB_WORKSPACE/depot_tools" >> "$GITHUB_PATH"
 
+      - name: Bootstrap gclient
+        shell: bash
+        working-directory: flutter
+        run: |
+          set -euo pipefail
+          cp engine/scripts/standard.gclient .gclient
+
       - name: Sync engine dependencies
         shell: bash
         working-directory: flutter
-        run: gclient sync
+        run: gclient sync -D
 
       - name: Build engine with engine_tool
         shell: bash

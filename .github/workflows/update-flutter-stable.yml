@@ -8,8 +8,8 @@ on:
         required: false
         default: true
         type: boolean
-  schedule:
-    - cron: '0 7 * * 1'
+  #schedule:
+  #  - cron: '0 7 * * 1'
 
 permissions:
   contents: write
@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout LwFlutter
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install tools
         run: |
@@ -54,7 +54,7 @@ jobs:
 
       - name: Create pull request
         if: ${{ steps.update.outputs.changed == 'true' }}
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           branch: update/flutter-stable-${{ steps.update.outputs.new }}
           title: Update Flutter stable to ${{ steps.update.outputs.new }}
