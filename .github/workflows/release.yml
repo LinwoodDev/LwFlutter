@@ -1,0 +1,266 @@
+name: Release LwFlutter
+
+on:
+  push:
+    tags:
+      - 'v*-lw.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v3.35.7-lw.1
+        required: true
+        type: string
+      build_windows_engine:
+        description: Force-build Windows engine artifact
+        required: false
+        default: false
+        type: boolean
+      build_linux_engine:
+        description: Force-build Linux engine artifact
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      flutter_ref: ${{ steps.meta.outputs.flutter_ref }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      has_windows_engine: ${{ steps.detect.outputs.has_windows_engine }}
+      has_linux_engine: ${{ steps.detect.outputs.has_linux_engine }}
+
+    steps:
+      - name: Checkout LwFlutter
+        uses: actions/checkout@v4
+
+      - name: Resolve metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+
+          flutter_ref="$(head -n 1 flutter.version | tr -d '[:space:]')"
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "flutter_ref=$flutter_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Detect engine patch folders
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          has_windows_engine=false
+          has_linux_engine=false
+
+          if find patches/windows -type f -name '*.patch' | grep -q .; then
+            has_windows_engine=true
+          fi
+
+          if find patches/linux -type f -name '*.patch' | grep -q .; then
+            has_linux_engine=true
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.build_windows_engine }}" = "true" ]; then
+            has_windows_engine=true
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.build_linux_engine }}" = "true" ]; then
+            has_linux_engine=true
+          fi
+
+          echo "has_windows_engine=$has_windows_engine" >> "$GITHUB_OUTPUT"
+          echo "has_linux_engine=$has_linux_engine" >> "$GITHUB_OUTPUT"
+
+      - name: Build engine matrix
+        id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          items=()
+
+          if [ "${{ steps.detect.outputs.has_windows_engine }}" = "true" ]; then
+            items+=( '{"platform":"windows","runner":"windows-latest","engine_out":"windows_release_x64","asset":"lwflutter-engine-windows_release_x64.zip"}' )
+          fi
+
+          if [ "${{ steps.detect.outputs.has_linux_engine }}" = "true" ]; then
+            items+=( '{"platform":"linux","runner":"ubuntu-latest","engine_out":"linux_release_x64","asset":"lwflutter-engine-linux_release_x64.zip"}' )
+          fi
+
+          if [ ${#items[@]} -eq 0 ]; then
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+          else
+            json=$(printf '%s\n' "${items[@]}" | jq -s -c '{include: .}')
+            echo "matrix=$json" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          tag="${{ steps.meta.outputs.tag }}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" \
+              --title "LwFlutter $tag" \
+              --prerelease
+          else
+            gh release create "$tag" \
+              --title "LwFlutter $tag" \
+              --prerelease \
+              --notes "LwFlutter patch release for Flutter ${{ steps.meta.outputs.flutter_ref }}."
+          fi
+
+  publish-patches:
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout LwFlutter
+        uses: actions/checkout@v4
+
+      - name: Create patches archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          7z a "$GITHUB_WORKSPACE/lwflutter-patches.zip" patches flutter.version
+
+      - name: Create manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > lwflutter-manifest.json <<EOF_MANIFEST
+          {
+            "tag": "${{ needs.prepare.outputs.tag }}",
+            "flutter_ref": "${{ needs.prepare.outputs.flutter_ref }}",
+            "patch_asset": "lwflutter-patches.zip",
+            "engines": {
+              "windows": {
+                "available": ${{ needs.prepare.outputs.has_windows_engine }},
+                "engine_out": "windows_release_x64",
+                "asset": "lwflutter-engine-windows_release_x64.zip"
+              },
+              "linux": {
+                "available": ${{ needs.prepare.outputs.has_linux_engine }},
+                "engine_out": "linux_release_x64",
+                "asset": "lwflutter-engine-linux_release_x64.zip"
+              }
+            }
+          }
+          EOF_MANIFEST
+
+      - name: Upload patch assets to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ needs.prepare.outputs.tag }}" \
+            lwflutter-patches.zip \
+            lwflutter-manifest.json \
+            --clobber
+
+  build-engine:
+    needs:
+      - prepare
+      - publish-patches
+    if: ${{ needs.prepare.outputs.matrix != '{"include":[]}' }}
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout LwFlutter
+        uses: actions/checkout@v4
+        with:
+          path: LwFlutter
+
+      - name: Checkout official Flutter
+        uses: actions/checkout@v4
+        with:
+          repository: flutter/flutter
+          ref: ${{ needs.prepare.outputs.flutter_ref }}
+          path: flutter
+
+      - name: Apply LwFlutter patches
+        shell: bash
+        working-directory: flutter
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          patches=(../LwFlutter/patches/**/*.patch)
+
+          if [ ${#patches[@]} -eq 0 ]; then
+            echo "No patches found."
+            exit 0
+          fi
+
+          for patch in "${patches[@]}"; do
+            echo "Applying $patch"
+            git am --3way "$patch"
+          done
+
+      - name: Add Flutter to PATH
+        shell: bash
+        run: |
+          echo "$GITHUB_WORKSPACE/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Warm Flutter cache
+        shell: bash
+        working-directory: flutter
+        run: |
+          flutter --version
+
+      - name: Install depot_tools
+        shell: bash
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
+          echo "$GITHUB_WORKSPACE/depot_tools" >> "$GITHUB_PATH"
+
+      - name: Sync engine dependencies
+        shell: bash
+        working-directory: flutter
+        run: |
+          gclient sync
+
+      - name: Build engine with engine_tool
+        shell: bash
+        working-directory: flutter/engine/src/flutter
+        run: |
+          dart tools/engine_tool/bin/et.dart build ${{ matrix.engine_out }}
+
+      - name: Zip engine output
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd flutter/engine/src/out
+          7z a "$GITHUB_WORKSPACE/${{ matrix.asset }}" "${{ matrix.engine_out }}"
+
+      - name: Upload engine asset to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ needs.prepare.outputs.tag }}" \
+            "${{ matrix.asset }}" \
+            --clobber
