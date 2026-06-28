@@ -29,8 +29,8 @@ LwFlutter/
 ## Patch folders
 
 - `patches/common/`: patches that should be applied for every platform and usually do not require a local engine artifact.
-- `patches/windows/`: Windows-specific patches. If files exist here, the release workflow can build `windows_release_x64`.
-- `patches/linux/`: Linux-specific patches. If files exist here, the release workflow can build `linux_release_x64`.
+- `patches/windows/`: Windows-specific patches. If files exist here, the release workflow can build `windows_release_x64` and `windows_release_arm64`.
+- `patches/linux/`: Linux-specific patches. If files exist here, the release workflow can build `linux_release_x64` and `linux_release_arm64`.
 
 All materialized patch files are applied to the official Flutter checkout in sorted order.
 
@@ -98,8 +98,10 @@ The release workflow publishes:
 ```text
 lwflutter-patches.zip
 lwflutter-manifest.json
-lwflutter-engine-windows_release_x64.zip  # only when Windows engine patches are present/requested
-lwflutter-engine-linux_release_x64.zip    # only when Linux engine patches are present/requested
+lwflutter-engine-windows_release_x64.zip   # only when Windows engine patches are present/requested
+lwflutter-engine-windows_release_arm64.zip
+lwflutter-engine-linux_release_x64.zip     # only when Linux engine patches are present/requested
+lwflutter-engine-linux_release_arm64.zip
 ```
 
 `lwflutter-patches.zip` contains materialized `.patch` files.
@@ -122,7 +124,9 @@ lwflutter-engine-linux_release_x64.zip    # only when Linux engine patches are p
     flutter build windows --release ${{ steps.flutter.outputs.local-engine-args }}
 ```
 
-If a matching LwFlutter release exists, patches are applied to official Flutter. The setup action defaults `platforms` from the current runner OS, so on Windows and Linux runners it will automatically look for the matching local-engine artifact. You can also pass a comma-separated list like `windows,linux`. Otherwise it falls back to official Flutter behavior.
+If a matching LwFlutter release exists, patches are applied to official Flutter. The setup action defaults `platforms` from the current runner OS, so on Windows and Linux runners it will automatically look for the matching local-engine artifact for the runner architecture (`x64` or `arm64`). You can also pass a comma-separated list like `windows,linux`. Otherwise it falls back to official Flutter behavior.
+
+If you already know the exact LwFlutter release tag, you can use `lwflutter-version` on its own and omit both `flutter-version` and `flutter-version-file`. The action will infer the underlying Flutter version from the tag, for example `v3.35.7-lw.1` implies Flutter `3.35.7`.
 
 If you use `flutter-version-file`, the Flutter version in that file must be an exact version, just like `subosito/flutter-action`.
 

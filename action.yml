@@ -3,11 +3,11 @@ description: Setup official Flutter, apply LwFlutter patches if available, and o
 
 inputs:
   flutter-version:
-    description: Exact official Flutter version to install, for example 3.35.7. Omit when using flutter-version-file.
+    description: Exact official Flutter version to install, for example 3.35.7. Omit when using flutter-version-file or lwflutter-version.
     required: false
     default: ''
   flutter-version-file:
-    description: Path to pubspec.yaml, .fvmrc, or .fvm/fvm_config.json for subosito/flutter-action.
+    description: Path to pubspec.yaml, .fvmrc, or .fvm/fvm_config.json for subosito/flutter-action. Omit when using flutter-version or lwflutter-version.
     required: false
     default: ''
   channel:
@@ -23,7 +23,7 @@ inputs:
     required: false
     default: LinwoodDev/LwFlutter
   lwflutter-version:
-    description: Optional explicit LwFlutter release tag, for example v3.35.7-lw.1. If empty, the newest matching v<flutter-version>-lw.* release is used.
+    description: Optional explicit LwFlutter release tag, for example v3.35.7-lw.1. If empty, the newest matching v<flutter-version>-lw.* release is used. Can also be used on its own to infer the Flutter version.
     required: false
     default: ''
   use-lwflutter:
@@ -69,18 +69,39 @@ runs:
 
         flutter_version="${{ inputs.flutter-version }}"
         flutter_version_file="${{ inputs.flutter-version-file }}"
+        lwflutter_version="${{ inputs.lwflutter-version }}"
+        expected_flutter_version=""
+
+        if [ -n "$lwflutter_version" ]; then
+          if [[ "$lwflutter_version" =~ ^v([0-9][0-9A-Za-z._-]*)-lw\.[0-9]+$ ]]; then
+            expected_flutter_version="${BASH_REMATCH[1]}"
+          else
+            echo "::error::lwflutter-version must look like v<flutter-version>-lw.N."
+            exit 1
+          fi
+        fi
 
         if [ -n "$flutter_version_file" ]; then
           flutter_version=""
         fi
 
         if [ -z "$flutter_version" ] && [ -z "$flutter_version_file" ]; then
-          echo "::error::Provide either flutter-version or flutter-version-file."
+          if [ -n "$expected_flutter_version" ]; then
+            flutter_version="$expected_flutter_version"
+          else
+            echo "::error::Provide either flutter-version, flutter-version-file, or lwflutter-version."
+            exit 1
+          fi
+        fi
+
+        if [ -n "$expected_flutter_version" ] && [ -n "$flutter_version" ] && [ "$expected_flutter_version" != "$flutter_version" ]; then
+          echo "::error::lwflutter-version ($lwflutter_version) does not match flutter-version ($flutter_version)."
           exit 1
         fi
 
         echo "flutter-version=$flutter_version" >> "$GITHUB_OUTPUT"
         echo "flutter-version-file=$flutter_version_file" >> "$GITHUB_OUTPUT"
+        echo "expected-flutter-version=$expected_flutter_version" >> "$GITHUB_OUTPUT"
 
     - name: Setup official Flutter
       uses: subosito/flutter-action@v2.23.0
@@ -96,9 +117,15 @@ runs:
       run: |
         set -euo pipefail
         flutter_version="$(flutter --version | head -n 1 | awk '{print $2}' | tr -d '[:space:]')"
+        expected_flutter_version="${{ steps.flutter-inputs.outputs.expected-flutter-version }}"
 
         if [ -z "$flutter_version" ]; then
           echo "::error::Could not determine the installed Flutter version"
+          exit 1
+        fi
+
+        if [ -n "$expected_flutter_version" ] && [ "$flutter_version" != "$expected_flutter_version" ]; then
+          echo "::error::Installed Flutter version ($flutter_version) does not match lwflutter-version ($expected_flutter_version)."
           exit 1
         fi
 
@@ -123,6 +150,18 @@ runs:
         if [ -z "$configured_platforms" ]; then
           configured_platforms="$runner_platform"
         fi
+
+        runner_arch="${{ runner.arch }}"
+        runner_arch="${runner_arch,,}"
+
+        case "$runner_arch" in
+          arm64|aarch64)
+            engine_cpu="arm64"
+            ;;
+          *)
+            engine_cpu="x64"
+            ;;
+        esac
 
         normalized_platforms=""
         IFS=',; ' read -r -a platform_tokens <<< "$configured_platforms"
@@ -151,10 +190,10 @@ runs:
 
         case "$platform" in
           windows)
-            engine_out="windows_release_x64"
+            engine_out="windows_release_${engine_cpu}"
             ;;
           linux)
-            engine_out="linux_release_x64"
+            engine_out="linux_release_${engine_cpu}"
             ;;
           *)
             engine_out=""
