@@ -261,6 +261,14 @@ jobs:
         working-directory: flutter
         run: |
           set -euo pipefail
+          if ! git config --get user.name >/dev/null; then
+            git config user.name "GitHub Actions"
+          fi
+
+          if ! git config --get user.email >/dev/null; then
+            git config user.email "actions@github.com"
+          fi
+
           shopt -s globstar nullglob
           patches=(../materialized-patches/**/*.patch)
 

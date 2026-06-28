@@ -16,11 +16,11 @@ LwFlutter/
 ├─ flutter.version
 ├─ patches/
 │  ├─ common/
-│  │  └─ *.patch or *.patch-url
+│  │  └─ *.patch
 │  ├─ windows/
-│  │  └─ *.patch or *.patch-url
+│  │  └─ *.patch
 │  └─ linux/
-│     └─ *.patch or *.patch-url
+│     └─ *.patch
 └─ .github/workflows/
    ├─ release.yml
    └─ test-patches.yml
@@ -36,30 +36,13 @@ All materialized patch files are applied to the official Flutter checkout in sor
 
 ## Patch files and patch sources
 
-You can commit normal patch files:
+You can commit patch files:
 
 ```text
 patches/windows/0001-my-change.patch
 ```
 
-Or a patch source file:
-
-```text
-patches/windows/0001-my-change.patch-url
-```
-
-A `.patch-url` file contains a URL to download during workflows, for example:
-
-```text
-https://github.com/flutter/flutter/pull/187629.patch
-```
-
-The workflows run `scripts/materialize_patches.sh` to turn all `.patch` and `.patch-url` files into a real patch set before applying or publishing them.
-
-## First included patch sources
-
-- `patches/linux/0001-flutter-pr-186831.patch-url` → https://github.com/flutter/flutter/pull/186831
-- `patches/windows/0001-flutter-pr-187629.patch-url` → https://github.com/flutter/flutter/pull/187629
+The workflows run `scripts/materialize_patches.sh` to copy all `.patch` files into a real patch set before applying or publishing them.
 
 ## Testing patches
 
@@ -119,7 +102,7 @@ lwflutter-engine-windows_release_x64.zip  # only when Windows engine patches are
 lwflutter-engine-linux_release_x64.zip    # only when Linux engine patches are present/requested
 ```
 
-`lwflutter-patches.zip` contains materialized `.patch` files, not the original `.patch-url` files.
+`lwflutter-patches.zip` contains materialized `.patch` files.
 
 ## Using from Linwood Butterfly
 

@@ -20,6 +20,19 @@ materialized="$work_dir/materialized-patches"
 "$script_dir/materialize_patches.sh" "$patch_root" "$materialized"
 
 cd "$flutter_root"
+
+ensure_git_identity() {
+  if ! git config --get user.name >/dev/null; then
+    git config user.name "GitHub Actions"
+  fi
+
+  if ! git config --get user.email >/dev/null; then
+    git config user.email "actions@github.com"
+  fi
+}
+
+ensure_git_identity
+
 shopt -s globstar nullglob
 patches=("$materialized"/**/*.patch)
 
