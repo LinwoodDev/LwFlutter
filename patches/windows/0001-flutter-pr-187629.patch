@@ -1,0 +1,1172 @@
+From 8b5e00aeb91d9477843512f5adb7b2c9dc511333 Mon Sep 17 00:00:00 2001
+From: CodeDoctorDE <codedoctor@linwood.dev>
+Date: Fri, 5 Jun 2026 22:16:39 +0200
+Subject: [PATCH 1/2] Reland Windows stylus button support
+
+---
+ .../shell/platform/embedder/embedder.cc       |   2 +
+ .../shell/platform/embedder/embedder.h        |  17 +
+ .../platform/embedder/fixtures/main.dart      |  14 +
+ .../embedder/tests/embedder_unittests.cc      |  53 +++
+ .../shell/platform/windows/flutter_window.cc  | 109 ++++-
+ .../shell/platform/windows/flutter_window.h   |   5 +-
+ .../windows/flutter_window_unittests.cc       | 378 +++++++++++++++++-
+ .../platform/windows/flutter_windows_view.cc  |  39 +-
+ .../platform/windows/flutter_windows_view.h   |   5 +-
+ .../platform/windows/testing/mock_window.h    |   5 +-
+ .../mock_window_binding_handler_delegate.h    |   9 +-
+ .../windows/window_binding_handler_delegate.h |   5 +-
+ .../platform/windows/window_unittests.cc      |   5 +-
+ 13 files changed, 568 insertions(+), 78 deletions(-)
+
+diff --git a/engine/src/flutter/shell/platform/embedder/embedder.cc b/engine/src/flutter/shell/platform/embedder/embedder.cc
+index 589d5014eee0b..64a18a82164a0 100644
+--- a/engine/src/flutter/shell/platform/embedder/embedder.cc
++++ b/engine/src/flutter/shell/platform/embedder/embedder.cc
+@@ -2762,6 +2762,8 @@ inline flutter::PointerData::DeviceKind ToPointerDataKind(
+       return flutter::PointerData::DeviceKind::kStylus;
+     case kFlutterPointerDeviceKindTrackpad:
+       return flutter::PointerData::DeviceKind::kTrackpad;
++    case kFlutterPointerDeviceKindInvertedStylus:
++      return flutter::PointerData::DeviceKind::kInvertedStylus;
+   }
+   return flutter::PointerData::DeviceKind::kMouse;
+ }
+diff --git a/engine/src/flutter/shell/platform/embedder/embedder.h b/engine/src/flutter/shell/platform/embedder/embedder.h
+index 232bb8e51ce10..e9f3769963b2f 100644
+--- a/engine/src/flutter/shell/platform/embedder/embedder.h
++++ b/engine/src/flutter/shell/platform/embedder/embedder.h
+@@ -1311,6 +1311,7 @@ typedef enum {
+   kFlutterPointerDeviceKindTouch,
+   kFlutterPointerDeviceKindStylus,
+   kFlutterPointerDeviceKindTrackpad,
++  kFlutterPointerDeviceKindInvertedStylus,
+ } FlutterPointerDeviceKind;
+ 
+ /// Flags for the `buttons` field of `FlutterPointerEvent` when `device_kind`
+@@ -1325,6 +1326,21 @@ typedef enum {
+   /// corresponding to the button number: 1 << 5 for the 6th, etc.
+ } FlutterPointerMouseButtons;
+ 
++/// Flags for the `buttons` field of `FlutterPointerEvent` when `device_kind`
++/// is `kFlutterPointerDeviceKindStylus` or
++/// `kFlutterPointerDeviceKindInvertedStylus`.
++typedef enum {
++  /// Whether the stylus has contact with the screen.
++  /// This matches the framework's `kStylusContact`.
++  kFlutterPointerButtonStylusContact = 1 << 0,
++  /// Whether the stylus's primary button is pressed.
++  /// This matches the framework's `kPrimaryStylusButton`.
++  kFlutterPointerButtonStylusPrimary = 1 << 1,
++  /// Whether the stylus's secondary button is pressed.
++  /// This matches the framework's `kSecondaryStylusButton`.
++  kFlutterPointerButtonStylusSecondary = 1 << 2,
++} FlutterPointerStylusButtons;
++
+ /// The type of a pointer signal.
+ typedef enum {
+   kFlutterPointerSignalKindNone,
+@@ -1360,6 +1376,7 @@ typedef struct {
+   /// correct buttons.
+   FlutterPointerDeviceKind device_kind;
+   /// The buttons currently pressed, if any.
++  /// See `FlutterPointerMouseButtons` or `FlutterPointerStylusButtons`.
+   int64_t buttons;
+   /// The x offset of the pan/zoom in physical pixels.
+   double pan_x;
+diff --git a/engine/src/flutter/shell/platform/embedder/fixtures/main.dart b/engine/src/flutter/shell/platform/embedder/fixtures/main.dart
+index bd36ea94f2d00..2bafc60c41f64 100644
+--- a/engine/src/flutter/shell/platform/embedder/fixtures/main.dart
++++ b/engine/src/flutter/shell/platform/embedder/fixtures/main.dart
+@@ -1452,6 +1452,20 @@ void pointer_data_packet() {
+   signalNativeTest();
+ }
+ 
++@pragma('vm:entry-point')
++// ignore: non_constant_identifier_names
++void pointer_data_packet_stylus_buttons() {
++  PlatformDispatcher.instance.onPointerDataPacket = (PointerDataPacket packet) {
++    signalNativeCount(packet.data.length);
++
++    for (final PointerData pointerData in packet.data) {
++      signalNativeMessage('buttons: ${pointerData.buttons}');
++    }
++  };
++
++  signalNativeTest();
++}
++
+ @pragma('vm:entry-point')
+ // ignore: non_constant_identifier_names
+ void pointer_data_packet_view_id() {
+diff --git a/engine/src/flutter/shell/platform/embedder/tests/embedder_unittests.cc b/engine/src/flutter/shell/platform/embedder/tests/embedder_unittests.cc
+index 5d579a36d09e6..364764f2e16a9 100644
+--- a/engine/src/flutter/shell/platform/embedder/tests/embedder_unittests.cc
++++ b/engine/src/flutter/shell/platform/embedder/tests/embedder_unittests.cc
+@@ -4078,6 +4078,59 @@ TEST_F(EmbedderTest, CanSendPointer) {
+   message_latch.Wait();
+ }
+ 
++/// Send a stylus pointer event to Dart and verify the buttons mask.
++TEST_F(EmbedderTest, CanSendStylusPointerButtons) {
++  auto& context = GetEmbedderContext<EmbedderTestContextSoftware>();
++  EmbedderConfigBuilder builder(context);
++  builder.SetSurface(DlISize(1, 1));
++  builder.SetDartEntrypoint("pointer_data_packet_stylus_buttons");
++
++  fml::AutoResetWaitableEvent ready_latch, count_latch, message_latch;
++  context.AddNativeCallback(
++      "SignalNativeTest",
++      CREATE_NATIVE_ENTRY(
++          [&ready_latch](Dart_NativeArguments args) { ready_latch.Signal(); }));
++  context.AddNativeCallback(
++      "SignalNativeCount",
++      CREATE_NATIVE_ENTRY([&count_latch](Dart_NativeArguments args) {
++        int count = tonic::DartConverter<int>::FromDart(
++            Dart_GetNativeArgument(args, 0));
++        EXPECT_EQ(count, 1);
++        count_latch.Signal();
++      }));
++  context.AddNativeCallback(
++      "SignalNativeMessage",
++      CREATE_NATIVE_ENTRY([&message_latch](Dart_NativeArguments args) {
++        auto message = tonic::DartConverter<std::string>::FromDart(
++            Dart_GetNativeArgument(args, 0));
++        EXPECT_EQ("buttons: 3", message);
++        message_latch.Signal();
++      }));
++
++  auto engine = builder.LaunchEngine();
++  ASSERT_TRUE(engine.is_valid());
++
++  ready_latch.Wait();
++
++  FlutterPointerEvent pointer_event = {};
++  pointer_event.struct_size = sizeof(FlutterPointerEvent);
++  pointer_event.phase = FlutterPointerPhase::kAdd;
++  pointer_event.device_kind = kFlutterPointerDeviceKindStylus;
++  pointer_event.buttons =
++      kFlutterPointerButtonStylusContact | kFlutterPointerButtonStylusPrimary;
++  pointer_event.x = 123;
++  pointer_event.y = 456;
++  pointer_event.timestamp = static_cast<size_t>(1234567890);
++  pointer_event.view_id = 0;
++
++  FlutterEngineResult result =
++      FlutterEngineSendPointerEvent(engine.get(), &pointer_event, 1);
++  ASSERT_EQ(result, kSuccess);
++
++  count_latch.Wait();
++  message_latch.Wait();
++}
++
+ /// Send a pointer event to Dart and wait until the Dart code echos with the
+ /// view ID.
+ TEST_F(EmbedderTest, CanSendPointerEventWithViewId) {
+diff --git a/engine/src/flutter/shell/platform/windows/flutter_window.cc b/engine/src/flutter/shell/platform/windows/flutter_window.cc
+index 36412d9af0dc5..d11ff4fd0a815 100644
+--- a/engine/src/flutter/shell/platform/windows/flutter_window.cc
++++ b/engine/src/flutter/shell/platform/windows/flutter_window.cc
+@@ -8,7 +8,7 @@
+ #include <dwmapi.h>
+ 
+ #include <chrono>
+-#include <map>
++#include <cstdint>
+ 
+ #include "flutter/fml/logging.h"
+ #include "flutter/shell/platform/embedder/embedder.h"
+@@ -89,6 +89,63 @@ static uint64_t ConvertWinButtonToFlutterButton(UINT button) {
+   return 0;
+ }
+ 
++// Translates mouse button state from Win32 API to FlutterPointerMouseButtons.
++static uint64_t ConvertWinMouseStateToFlutterButtons(WPARAM wparam) {
++  uint64_t flutter_buttons = 0;
++  if (wparam & MK_LBUTTON) {
++    flutter_buttons |= kFlutterPointerButtonMousePrimary;
++  }
++  if (wparam & MK_RBUTTON) {
++    flutter_buttons |= kFlutterPointerButtonMouseSecondary;
++  }
++  if (wparam & MK_MBUTTON) {
++    flutter_buttons |= kFlutterPointerButtonMouseMiddle;
++  }
++  if (wparam & MK_XBUTTON1) {
++    flutter_buttons |= kFlutterPointerButtonMouseBack;
++  }
++  if (wparam & MK_XBUTTON2) {
++    flutter_buttons |= kFlutterPointerButtonMouseForward;
++  }
++  return flutter_buttons;
++}
++
++// Translate stylus pointer flags from Win32 API to FlutterPointerStylusButtons.
++static uint64_t ConvertWinStylusFlagsToFlutterButtons(UINT pen_flags,
++                                                      UINT pointer_flags) {
++  uint64_t flutter_buttons = 0;
++  if ((pointer_flags & POINTER_FLAG_INCONTACT) == 0) {
++    return flutter_buttons;
++  }
++  flutter_buttons |= kFlutterPointerButtonStylusContact;
++  if (pen_flags & PEN_FLAG_BARREL) {
++    flutter_buttons |= kFlutterPointerButtonStylusPrimary;
++  }
++  if (pen_flags & PEN_FLAG_ERASER) {
++    flutter_buttons |= kFlutterPointerButtonStylusSecondary;
++  }
++  return flutter_buttons;
++}
++
++// Translate pointer flags from Win32 API to Flutter pointer buttons.
++static uint64_t ConvertWinPointerFlagsToFlutterButtons(UINT flags) {
++  uint64_t flutter_buttons = 0;
++  if ((flags & POINTER_FLAG_INCONTACT) == 0) {
++    // If the pointer is not in contact, then no buttons should be considered
++    return flutter_buttons;
++  }
++  if (flags & POINTER_FLAG_FIRSTBUTTON) {
++    flutter_buttons |= kFlutterPointerButtonMousePrimary;
++  }
++  if (flags & POINTER_FLAG_SECONDBUTTON) {
++    flutter_buttons |= kFlutterPointerButtonMouseSecondary;
++  }
++  if (flags & POINTER_FLAG_THIRDBUTTON) {
++    flutter_buttons |= kFlutterPointerButtonMouseMiddle;
++  }
++  return flutter_buttons;
++}
++
+ }  // namespace
+ 
+ FlutterWindow::FlutterWindow(
+@@ -186,26 +243,25 @@ void FlutterWindow::OnPointerMove(double x,
+                                   double y,
+                                   FlutterPointerDeviceKind device_kind,
+                                   int32_t device_id,
++                                  uint64_t buttons,
+                                   uint32_t rotation,
+                                   uint32_t pressure,
+                                   int modifiers_state) {
+   binding_handler_delegate_->OnPointerMove(x, y, device_kind, device_id,
+-                                           rotation, pressure, modifiers_state);
++                                           buttons, rotation, pressure,
++                                           modifiers_state);
+ }
+ 
+ void FlutterWindow::OnPointerDown(double x,
+                                   double y,
+                                   FlutterPointerDeviceKind device_kind,
+                                   int32_t device_id,
+-                                  UINT button,
++                                  uint64_t buttons,
+                                   uint32_t pressure,
+                                   uint32_t rotation) {
+-  uint64_t flutter_button = ConvertWinButtonToFlutterButton(button);
+-  if (flutter_button != 0) {
+-    binding_handler_delegate_->OnPointerDown(
+-        x, y, device_kind, device_id,
+-        static_cast<FlutterPointerMouseButtons>(flutter_button), rotation,
+-        pressure);
++  if (buttons != 0) {
++    binding_handler_delegate_->OnPointerDown(x, y, device_kind, device_id,
++                                             buttons, rotation, pressure);
+   }
+ }
+ 
+@@ -213,13 +269,8 @@ void FlutterWindow::OnPointerUp(double x,
+                                 double y,
+                                 FlutterPointerDeviceKind device_kind,
+                                 int32_t device_id,
+-                                UINT button) {
+-  uint64_t flutter_button = ConvertWinButtonToFlutterButton(button);
+-  if (flutter_button != 0) {
+-    binding_handler_delegate_->OnPointerUp(
+-        x, y, device_kind, device_id,
+-        static_cast<FlutterPointerMouseButtons>(flutter_button));
+-  }
++                                uint64_t buttons) {
++  binding_handler_delegate_->OnPointerUp(x, y, device_kind, device_id, buttons);
+ }
+ 
+ void FlutterWindow::OnPointerLeave(double x,
+@@ -537,6 +588,7 @@ FlutterWindow::HandleMessage(UINT const message,
+   int x_pos = 0, y_pos = 0;
+   UINT width = 0, height = 0;
+   UINT button_pressed = 0;
++  uint64_t flutter_button = 0;
+   FlutterPointerDeviceKind device_kind;
+ 
+   switch (message) {
+@@ -571,11 +623,17 @@ FlutterWindow::HandleMessage(UINT const message,
+       if (windows_proc_table_->GetPointerInfo(pointerId, &pointerInfo)) {
+         UINT32 pressure = 0;
+         UINT32 rotation = 0;
++        bool is_inverted = false;
++        flutter_button =
++            ConvertWinPointerFlagsToFlutterButtons(pointerInfo.pointerFlags);
+         if (pointerInfo.pointerType == PT_PEN) {
+           POINTER_PEN_INFO penInfo;
+           if (windows_proc_table_->GetPointerPenInfo(pointerId, &penInfo)) {
+             pressure = penInfo.pressure;
+             rotation = penInfo.rotation;
++            is_inverted = (penInfo.penFlags & PEN_FLAG_INVERTED) != 0;
++            flutter_button = ConvertWinStylusFlagsToFlutterButtons(
++                penInfo.penFlags, pointerInfo.pointerFlags);
+           }
+         }
+         auto touch_id = touch_id_generator_.GetGeneratedId(pointerId);
+@@ -585,7 +643,8 @@ FlutterWindow::HandleMessage(UINT const message,
+             device_kind = kFlutterPointerDeviceKindTouch;
+             break;
+           case PT_PEN:
+-            device_kind = kFlutterPointerDeviceKindStylus;
++            device_kind = is_inverted ? kFlutterPointerDeviceKindInvertedStylus
++                                      : kFlutterPointerDeviceKindStylus;
+             break;
+           case PT_MOUSE:
+             device_kind = kFlutterPointerDeviceKindMouse;
+@@ -599,13 +658,14 @@ FlutterWindow::HandleMessage(UINT const message,
+             break;
+         }
+         if (message == WM_POINTERDOWN) {
+-          OnPointerDown(x, y, device_kind, touch_id, WM_LBUTTONDOWN, rotation,
++          OnPointerDown(x, y, device_kind, touch_id, flutter_button, rotation,
+                         pressure);
+         } else if (message == WM_POINTERUPDATE) {
+-          OnPointerMove(x, y, device_kind, touch_id, rotation, pressure,
++          OnPointerMove(x, y, device_kind, touch_id, flutter_button, rotation,
++                        pressure,
+                         /* modifiers_state=*/0);
+         } else if (message == WM_POINTERUP) {
+-          OnPointerUp(x, y, device_kind, touch_id, WM_LBUTTONUP);
++          OnPointerUp(x, y, device_kind, touch_id, flutter_button);
+           // keep tracking the pointer (especially important for stylus)
+           // This allows a stylus to "hover" over the window
+         } else if (message == WM_POINTERLEAVE) {
+@@ -633,6 +693,7 @@ FlutterWindow::HandleMessage(UINT const message,
+           mods |= kShift;
+         }
+         OnPointerMove(mouse_x_, mouse_y_, device_kind, kDefaultPointerDeviceId,
++                      ConvertWinMouseStateToFlutterButtons(wparam),
+                       /*rotation=*/0, /*pressure=*/0, mods);
+       }
+       break;
+@@ -688,8 +749,10 @@ FlutterWindow::HandleMessage(UINT const message,
+       }
+       x_pos = GET_X_LPARAM(lparam);
+       y_pos = GET_Y_LPARAM(lparam);
++      flutter_button = ConvertWinButtonToFlutterButton(button_pressed);
++
+       OnPointerDown(static_cast<double>(x_pos), static_cast<double>(y_pos),
+-                    device_kind, kDefaultPointerDeviceId, button_pressed,
++                    device_kind, kDefaultPointerDeviceId, flutter_button,
+                     /*rotation=*/0, /*pressure=*/0);
+       break;
+     case WM_LBUTTONUP:
+@@ -710,8 +773,10 @@ FlutterWindow::HandleMessage(UINT const message,
+       }
+       x_pos = GET_X_LPARAM(lparam);
+       y_pos = GET_Y_LPARAM(lparam);
++      flutter_button = ConvertWinButtonToFlutterButton(button_pressed);
++
+       OnPointerUp(static_cast<double>(x_pos), static_cast<double>(y_pos),
+-                  device_kind, kDefaultPointerDeviceId, button_pressed);
++                  device_kind, kDefaultPointerDeviceId, flutter_button);
+       break;
+     case WM_MOUSEWHEEL:
+       OnScroll(0.0,
+diff --git a/engine/src/flutter/shell/platform/windows/flutter_window.h b/engine/src/flutter/shell/platform/windows/flutter_window.h
+index 2fd5135c924b0..d59cf058dfb2f 100644
+--- a/engine/src/flutter/shell/platform/windows/flutter_window.h
++++ b/engine/src/flutter/shell/platform/windows/flutter_window.h
+@@ -84,6 +84,7 @@ class FlutterWindow : public KeyboardManager::WindowDelegate,
+                              double y,
+                              FlutterPointerDeviceKind device_kind,
+                              int32_t device_id,
++                             uint64_t buttons,
+                              uint32_t rotation,
+                              uint32_t pressure,
+                              int modifiers_state);
+@@ -93,7 +94,7 @@ class FlutterWindow : public KeyboardManager::WindowDelegate,
+                              double y,
+                              FlutterPointerDeviceKind device_kind,
+                              int32_t device_id,
+-                             UINT button,
++                             uint64_t buttons,
+                              uint32_t rotation,
+                              uint32_t pressure);
+ 
+@@ -103,7 +104,7 @@ class FlutterWindow : public KeyboardManager::WindowDelegate,
+                            double y,
+                            FlutterPointerDeviceKind device_kind,
+                            int32_t device_id,
+-                           UINT button);
++                           uint64_t buttons);
+ 
+   // Called when the mouse leaves the window.
+   virtual void OnPointerLeave(double x,
+diff --git a/engine/src/flutter/shell/platform/windows/flutter_window_unittests.cc b/engine/src/flutter/shell/platform/windows/flutter_window_unittests.cc
+index 65ef8934ef3f3..a16e69ae6695e 100644
+--- a/engine/src/flutter/shell/platform/windows/flutter_window_unittests.cc
++++ b/engine/src/flutter/shell/platform/windows/flutter_window_unittests.cc
+@@ -192,15 +192,15 @@ TEST_F(FlutterWindowTest, OnPointerStarSendsDeviceType) {
+   // Move
+   EXPECT_CALL(delegate,
+               OnPointerMove(10.0, 10.0, kFlutterPointerDeviceKindMouse,
+-                            kDefaultPointerDeviceId, 0, 0, 0))
++                            kDefaultPointerDeviceId, 0, 0, 0, 0))
+       .Times(1);
+   EXPECT_CALL(delegate,
+               OnPointerMove(10.0, 10.0, kFlutterPointerDeviceKindTouch,
+-                            kDefaultPointerDeviceId, 0, 0, 0))
++                            kDefaultPointerDeviceId, 0, 0, 0, 0))
+       .Times(1);
+   EXPECT_CALL(delegate,
+               OnPointerMove(10.0, 10.0, kFlutterPointerDeviceKindStylus,
+-                            kDefaultPointerDeviceId, 0, 0, 0))
++                            kDefaultPointerDeviceId, 0, 0, 0, 0))
+       .Times(1);
+ 
+   // Down
+@@ -249,31 +249,37 @@ TEST_F(FlutterWindowTest, OnPointerStarSendsDeviceType) {
+       .Times(1);
+ 
+   win32window.OnPointerMove(10.0, 10.0, kFlutterPointerDeviceKindMouse,
+-                            kDefaultPointerDeviceId, 0, 0, 0);
++                            kDefaultPointerDeviceId, 0, 0, 0, 0);
+   win32window.OnPointerDown(10.0, 10.0, kFlutterPointerDeviceKindMouse,
+-                            kDefaultPointerDeviceId, WM_LBUTTONDOWN, 0, 0);
++                            kDefaultPointerDeviceId,
++                            kFlutterPointerButtonMousePrimary, 0, 0);
+   win32window.OnPointerUp(10.0, 10.0, kFlutterPointerDeviceKindMouse,
+-                          kDefaultPointerDeviceId, WM_LBUTTONDOWN);
++                          kDefaultPointerDeviceId,
++                          kFlutterPointerButtonMousePrimary);
+   win32window.OnPointerLeave(10.0, 10.0, kFlutterPointerDeviceKindMouse,
+                              kDefaultPointerDeviceId);
+ 
+   // Touch
+   win32window.OnPointerMove(10.0, 10.0, kFlutterPointerDeviceKindTouch,
+-                            kDefaultPointerDeviceId, 0, 0, 0);
++                            kDefaultPointerDeviceId, 0, 0, 0, 0);
+   win32window.OnPointerDown(10.0, 10.0, kFlutterPointerDeviceKindTouch,
+-                            kDefaultPointerDeviceId, WM_LBUTTONDOWN, 0, 0);
++                            kDefaultPointerDeviceId,
++                            kFlutterPointerButtonMousePrimary, 0, 0);
+   win32window.OnPointerUp(10.0, 10.0, kFlutterPointerDeviceKindTouch,
+-                          kDefaultPointerDeviceId, WM_LBUTTONDOWN);
++                          kDefaultPointerDeviceId,
++                          kFlutterPointerButtonMousePrimary);
+   win32window.OnPointerLeave(10.0, 10.0, kFlutterPointerDeviceKindTouch,
+                              kDefaultPointerDeviceId);
+ 
+   // Pen
+   win32window.OnPointerMove(10.0, 10.0, kFlutterPointerDeviceKindStylus,
+-                            kDefaultPointerDeviceId, 0, 0, 0);
++                            kDefaultPointerDeviceId, 0, 0, 0, 0);
+   win32window.OnPointerDown(10.0, 10.0, kFlutterPointerDeviceKindStylus,
+-                            kDefaultPointerDeviceId, WM_LBUTTONDOWN, 0, 0);
++                            kDefaultPointerDeviceId,
++                            kFlutterPointerButtonMousePrimary, 0, 0);
+   win32window.OnPointerUp(10.0, 10.0, kFlutterPointerDeviceKindStylus,
+-                          kDefaultPointerDeviceId, WM_LBUTTONDOWN);
++                          kDefaultPointerDeviceId,
++                          kFlutterPointerButtonMousePrimary);
+   win32window.OnPointerLeave(10.0, 10.0, kFlutterPointerDeviceKindStylus,
+                              kDefaultPointerDeviceId);
+ 
+@@ -301,6 +307,7 @@ TEST_F(FlutterWindowTest, OnStylusPointerDown) {
+         if (pen_info != nullptr) {
+           pen_info->pressure = 720;  // Non-zero pressure for contact events
+           pen_info->rotation = 0;
++          pen_info->penFlags = 0;
+         }
+         return TRUE;
+       });
+@@ -316,7 +323,7 @@ TEST_F(FlutterWindowTest, OnStylusPointerDown) {
+   EXPECT_CALL(delegate,
+               OnPointerDown(10.0, 10.0, kFlutterPointerDeviceKindStylus,
+                             kDefaultPointerDeviceId,
+-                            kFlutterPointerButtonMousePrimary, 720, 0))
++                            kFlutterPointerButtonStylusContact, 720, 0))
+       .Times(1);
+ 
+   UINT32 pointerId = 1;
+@@ -344,6 +351,7 @@ TEST_F(FlutterWindowTest, OnStylusPointerMove) {
+         if (pen_info != nullptr) {
+           pen_info->pressure = 720;  // Non-zero pressure for contact events
+           pen_info->rotation = 10;   // This is PRE-transformation to radians.
++          pen_info->penFlags = 0;
+         }
+         return TRUE;
+       });
+@@ -352,8 +360,10 @@ TEST_F(FlutterWindowTest, OnStylusPointerMove) {
+   MockWindowBindingHandlerDelegate delegate;
+   win32window.SetView(&delegate);
+ 
+-  EXPECT_CALL(delegate, OnPointerMove(15, 20, kFlutterPointerDeviceKindStylus,
+-                                      kDefaultPointerDeviceId, 10, 720, 0))
++  EXPECT_CALL(delegate,
++              OnPointerMove(15, 20, kFlutterPointerDeviceKindStylus,
++                            kDefaultPointerDeviceId,
++                            kFlutterPointerButtonStylusContact, 10, 720, 0))
+       .Times(1);
+ 
+   UINT32 pointerId = 1;
+@@ -366,7 +376,15 @@ TEST_F(FlutterWindowTest, OnStylusPointerUp) {
+   auto mock_proc_table = std::make_shared<MockWindowsProcTable>();
+ 
+   EXPECT_CALL(*mock_proc_table, GetPointerInfo(_, _))
+-      .WillRepeatedly([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
++      .WillOnce([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
++        if (pointer_info != nullptr) {
++          pointer_info->pointerType = PT_PEN;
++          pointer_info->pointerId = pointer_id;
++          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT;
++        }
++        return TRUE;
++      })
++      .WillOnce([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
+         if (pointer_info != nullptr) {
+           pointer_info->pointerType = PT_PEN;
+           pointer_info->pointerId = pointer_id;
+@@ -380,6 +398,7 @@ TEST_F(FlutterWindowTest, OnStylusPointerUp) {
+         if (pen_info != nullptr) {
+           pen_info->pressure = 720;
+           pen_info->rotation = 0;
++          pen_info->penFlags = 0;
+         }
+         return TRUE;
+       });
+@@ -388,13 +407,19 @@ TEST_F(FlutterWindowTest, OnStylusPointerUp) {
+   MockWindowBindingHandlerDelegate delegate;
+   win32window.SetView(&delegate);
+ 
++  EXPECT_CALL(delegate,
++              OnPointerDown(25, 30, kFlutterPointerDeviceKindStylus,
++                            kDefaultPointerDeviceId,
++                            kFlutterPointerButtonStylusContact, 720, 0))
++      .Times(1);
+   EXPECT_CALL(delegate, OnPointerUp(25, 30, kFlutterPointerDeviceKindStylus,
+-                                    kDefaultPointerDeviceId,
+-                                    kFlutterPointerButtonMousePrimary))
++                                    kDefaultPointerDeviceId, 0))
+       .Times(1);
+ 
+   UINT32 pointerId = 1;
+   WPARAM wparam = static_cast<WPARAM>(pointerId);
++  InjectPointerMessageWithClientPoint(win32window, WM_POINTERDOWN, wparam, 25,
++                                      30);
+   InjectPointerMessageWithClientPoint(win32window, WM_POINTERUP, wparam, 25,
+                                       30);
+ }
+@@ -417,6 +442,7 @@ TEST_F(FlutterWindowTest, OnStylusPointerLeave) {
+         if (pen_info != nullptr) {
+           pen_info->pressure = 720;
+           pen_info->rotation = 0;
++          pen_info->penFlags = 0;
+         }
+         return TRUE;
+       });
+@@ -441,7 +467,17 @@ TEST_F(FlutterWindowTest, OnStylusPointerHover) {
+   auto mock_proc_table = std::make_shared<MockWindowsProcTable>();
+ 
+   EXPECT_CALL(*mock_proc_table, GetPointerInfo(_, _))
+-      .WillRepeatedly([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
++      .WillOnce([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
++        if (pointer_info != nullptr) {
++          pointer_info->pointerId = 1;
++          pointer_info->pointerType = PT_PEN;
++          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT;
++          pointer_info->ptPixelLocation.x = 45;
++          pointer_info->ptPixelLocation.y = 50;
++        }
++        return TRUE;
++      })
++      .WillOnce([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
+         if (pointer_info != nullptr) {
+           pointer_info->pointerId = 1;
+           pointer_info->pointerType = PT_PEN;
+@@ -458,6 +494,7 @@ TEST_F(FlutterWindowTest, OnStylusPointerHover) {
+         if (pen_info != nullptr) {
+           pen_info->pressure = 0;
+           pen_info->rotation = 0;
++          pen_info->penFlags = 0;
+         }
+         return TRUE;
+       });
+@@ -469,7 +506,7 @@ TEST_F(FlutterWindowTest, OnStylusPointerHover) {
+   // First establish the pointer with WM_POINTERDOWN
+   EXPECT_CALL(delegate,
+               OnPointerDown(45, 50, kFlutterPointerDeviceKindStylus, 0,
+-                            kFlutterPointerButtonMousePrimary, 0, 0))
++                            kFlutterPointerButtonStylusContact, 0, 0))
+       .Times(1);
+ 
+   UINT32 pointerId = 1;
+@@ -479,7 +516,7 @@ TEST_F(FlutterWindowTest, OnStylusPointerHover) {
+ 
+   // Now expect OnPointerMove to be called for hover events
+   EXPECT_CALL(delegate, OnPointerMove(45, 50, kFlutterPointerDeviceKindStylus,
+-                                      0, 0, 0, 0))
++                                      0, 0, 0, 0, 0))
+       .Times(1);
+ 
+   // Inject WM_POINTERUPDATE message (hover event)
+@@ -487,6 +524,305 @@ TEST_F(FlutterWindowTest, OnStylusPointerHover) {
+                                       50);
+ }
+ 
++TEST_F(FlutterWindowTest, OnStylusHoverAfterPointerUp) {
++  auto mock_proc_table = std::make_shared<MockWindowsProcTable>();
++
++  EXPECT_CALL(*mock_proc_table, GetPointerInfo(_, _))
++      .WillOnce([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
++        if (pointer_info != nullptr) {
++          pointer_info->pointerType = PT_PEN;
++          pointer_info->pointerId = pointer_id;
++          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT;
++        }
++        return TRUE;
++      })
++      .WillOnce([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
++        if (pointer_info != nullptr) {
++          pointer_info->pointerType = PT_PEN;
++          pointer_info->pointerId = pointer_id;
++          pointer_info->pointerFlags = POINTER_FLAG_UP;
++        }
++        return TRUE;
++      })
++      .WillOnce([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
++        if (pointer_info != nullptr) {
++          pointer_info->pointerType = PT_PEN;
++          pointer_info->pointerId = pointer_id;
++          pointer_info->pointerFlags = POINTER_FLAG_UPDATE;
++        }
++        return TRUE;
++      });
++
++  EXPECT_CALL(*mock_proc_table, GetPointerPenInfo(_, _))
++      .WillRepeatedly([](UINT32 pointer_id, POINTER_PEN_INFO* pen_info) {
++        if (pen_info != nullptr) {
++          pen_info->pressure = 720;
++          pen_info->rotation = 0;
++          pen_info->penFlags = 0;
++        }
++        return TRUE;
++      });
++
++  MockFlutterWindow win32window(100, 100, mock_proc_table);
++  MockWindowBindingHandlerDelegate delegate;
++  win32window.SetView(&delegate);
++
++  EXPECT_CALL(delegate,
++              OnPointerDown(10.0, 10.0, kFlutterPointerDeviceKindStylus,
++                            kDefaultPointerDeviceId,
++                            kFlutterPointerButtonStylusContact, 720, 0))
++      .Times(1);
++  EXPECT_CALL(delegate, OnPointerUp(10.0, 10.0, kFlutterPointerDeviceKindStylus,
++                                    kDefaultPointerDeviceId, 0))
++      .Times(1);
++  EXPECT_CALL(delegate,
++              OnPointerMove(10.0, 10.0, kFlutterPointerDeviceKindStylus,
++                            kDefaultPointerDeviceId, 0, 0, 720, 0))
++      .Times(1);
++
++  UINT32 pointerId = 1;
++  WPARAM wparam = static_cast<WPARAM>(pointerId);
++  InjectPointerMessageWithClientPoint(win32window, WM_POINTERDOWN, wparam, 10,
++                                      10);
++  InjectPointerMessageWithClientPoint(win32window, WM_POINTERUP, wparam, 10,
++                                      10);
++  InjectPointerMessageWithClientPoint(win32window, WM_POINTERUPDATE, wparam, 10,
++                                      10);
++}
++
++TEST_F(FlutterWindowTest, OnStylusBarrelButtonUsesPenFlags) {
++  auto mock_proc_table = std::make_shared<MockWindowsProcTable>();
++
++  EXPECT_CALL(*mock_proc_table, GetPointerInfo(_, _))
++      .WillRepeatedly([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
++        if (pointer_info != nullptr) {
++          pointer_info->pointerType = PT_PEN;
++          pointer_info->pointerId = pointer_id;
++          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT;
++        }
++        return TRUE;
++      });
++
++  EXPECT_CALL(*mock_proc_table, GetPointerPenInfo(_, _))
++      .WillRepeatedly([](UINT32 pointer_id, POINTER_PEN_INFO* pen_info) {
++        if (pen_info != nullptr) {
++          pen_info->pressure = 720;
++          pen_info->rotation = 0;
++          pen_info->penFlags = PEN_FLAG_BARREL;
++        }
++        return TRUE;
++      });
++
++  MockFlutterWindow win32window(100, 100, mock_proc_table);
++  MockWindowBindingHandlerDelegate delegate;
++  win32window.SetView(&delegate);
++
++  EXPECT_CALL(delegate,
++              OnPointerDown(10.0, 10.0, kFlutterPointerDeviceKindStylus,
++                            kDefaultPointerDeviceId,
++                            kFlutterPointerButtonStylusContact |
++                                kFlutterPointerButtonStylusPrimary,
++                            720, 0))
++      .Times(1);
++
++  UINT32 pointerId = 1;
++  WPARAM wparam = static_cast<WPARAM>(pointerId);
++  InjectPointerMessageWithClientPoint(win32window, WM_POINTERDOWN, wparam, 10,
++                                      10);
++}
++
++TEST_F(FlutterWindowTest, OnStylusEraserButtonUsesPenFlags) {
++  auto mock_proc_table = std::make_shared<MockWindowsProcTable>();
++
++  EXPECT_CALL(*mock_proc_table, GetPointerInfo(_, _))
++      .WillRepeatedly([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
++        if (pointer_info != nullptr) {
++          pointer_info->pointerType = PT_PEN;
++          pointer_info->pointerId = pointer_id;
++          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT;
++        }
++        return TRUE;
++      });
++
++  EXPECT_CALL(*mock_proc_table, GetPointerPenInfo(_, _))
++      .WillRepeatedly([](UINT32 pointer_id, POINTER_PEN_INFO* pen_info) {
++        if (pen_info != nullptr) {
++          pen_info->pressure = 720;
++          pen_info->rotation = 0;
++          pen_info->penFlags = PEN_FLAG_ERASER;
++        }
++        return TRUE;
++      });
++
++  MockFlutterWindow win32window(100, 100, mock_proc_table);
++  MockWindowBindingHandlerDelegate delegate;
++  win32window.SetView(&delegate);
++
++  EXPECT_CALL(delegate,
++              OnPointerDown(10.0, 10.0, kFlutterPointerDeviceKindStylus,
++                            kDefaultPointerDeviceId,
++                            kFlutterPointerButtonStylusContact |
++                                kFlutterPointerButtonStylusSecondary,
++                            720, 0))
++      .Times(1);
++
++  UINT32 pointerId = 1;
++  WPARAM wparam = static_cast<WPARAM>(pointerId);
++  InjectPointerMessageWithClientPoint(win32window, WM_POINTERDOWN, wparam, 10,
++                                      10);
++}
++
++TEST_F(FlutterWindowTest, OnInvertedStylusPointerDownUsesDeviceKind) {
++  auto mock_proc_table = std::make_shared<MockWindowsProcTable>();
++
++  EXPECT_CALL(*mock_proc_table, GetPointerInfo(_, _))
++      .WillRepeatedly([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
++        if (pointer_info != nullptr) {
++          pointer_info->pointerType = PT_PEN;
++          pointer_info->pointerId = pointer_id;
++          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT;
++        }
++        return TRUE;
++      });
++
++  EXPECT_CALL(*mock_proc_table, GetPointerPenInfo(_, _))
++      .WillRepeatedly([](UINT32 pointer_id, POINTER_PEN_INFO* pen_info) {
++        if (pen_info != nullptr) {
++          pen_info->pressure = 720;
++          pen_info->rotation = 0;
++          pen_info->penFlags = PEN_FLAG_INVERTED;
++        }
++        return TRUE;
++      });
++
++  MockFlutterWindow win32window(100, 100, mock_proc_table);
++  MockWindowBindingHandlerDelegate delegate;
++  win32window.SetView(&delegate);
++
++  EXPECT_CALL(delegate,
++              OnPointerDown(10.0, 10.0, kFlutterPointerDeviceKindInvertedStylus,
++                            kDefaultPointerDeviceId,
++                            kFlutterPointerButtonStylusContact, 720, 0))
++      .Times(1);
++
++  UINT32 pointerId = 1;
++  WPARAM wparam = static_cast<WPARAM>(pointerId);
++  InjectPointerMessageWithClientPoint(win32window, WM_POINTERDOWN, wparam, 10,
++                                      10);
++}
++
++TEST_F(FlutterWindowTest, OnStylusBarrelButtonUpdateMovesWithUpdatedButtons) {
++  auto mock_proc_table = std::make_shared<MockWindowsProcTable>();
++
++  EXPECT_CALL(*mock_proc_table, GetPointerInfo(_, _))
++      .WillRepeatedly([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
++        if (pointer_info != nullptr) {
++          pointer_info->pointerType = PT_PEN;
++          pointer_info->pointerId = pointer_id;
++          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT;
++        }
++        return TRUE;
++      });
++
++  EXPECT_CALL(*mock_proc_table, GetPointerPenInfo(_, _))
++      .WillOnce([](UINT32 pointer_id, POINTER_PEN_INFO* pen_info) {
++        if (pen_info != nullptr) {
++          pen_info->pressure = 720;
++          pen_info->rotation = 0;
++          pen_info->penFlags = 0;
++        }
++        return TRUE;
++      })
++      .WillOnce([](UINT32 pointer_id, POINTER_PEN_INFO* pen_info) {
++        if (pen_info != nullptr) {
++          pen_info->pressure = 720;
++          pen_info->rotation = 0;
++          pen_info->penFlags = PEN_FLAG_BARREL;
++        }
++        return TRUE;
++      });
++
++  MockFlutterWindow win32window(100, 100, mock_proc_table);
++  MockWindowBindingHandlerDelegate delegate;
++  win32window.SetView(&delegate);
++
++  EXPECT_CALL(delegate,
++              OnPointerDown(10.0, 10.0, kFlutterPointerDeviceKindStylus,
++                            kDefaultPointerDeviceId,
++                            kFlutterPointerButtonStylusContact, 720, 0))
++      .Times(1);
++  EXPECT_CALL(delegate,
++              OnPointerMove(10.0, 10.0, kFlutterPointerDeviceKindStylus,
++                            kDefaultPointerDeviceId,
++                            kFlutterPointerButtonStylusContact |
++                                kFlutterPointerButtonStylusPrimary,
++                            0, 720, 0))
++      .Times(1);
++
++  UINT32 pointerId = 1;
++  WPARAM wparam = static_cast<WPARAM>(pointerId);
++  InjectPointerMessageWithClientPoint(win32window, WM_POINTERDOWN, wparam, 10,
++                                      10);
++  InjectPointerMessageWithClientPoint(win32window, WM_POINTERUPDATE, wparam, 10,
++                                      10);
++}
++
++TEST_F(FlutterWindowTest, OnStylusBarrelButtonUpdateMovesWithReleasedButton) {
++  auto mock_proc_table = std::make_shared<MockWindowsProcTable>();
++
++  EXPECT_CALL(*mock_proc_table, GetPointerInfo(_, _))
++      .WillRepeatedly([](UINT32 pointer_id, POINTER_INFO* pointer_info) {
++        if (pointer_info != nullptr) {
++          pointer_info->pointerType = PT_PEN;
++          pointer_info->pointerId = pointer_id;
++          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT;
++        }
++        return TRUE;
++      });
++
++  EXPECT_CALL(*mock_proc_table, GetPointerPenInfo(_, _))
++      .WillOnce([](UINT32 pointer_id, POINTER_PEN_INFO* pen_info) {
++        if (pen_info != nullptr) {
++          pen_info->pressure = 720;
++          pen_info->rotation = 0;
++          pen_info->penFlags = PEN_FLAG_BARREL;
++        }
++        return TRUE;
++      })
++      .WillOnce([](UINT32 pointer_id, POINTER_PEN_INFO* pen_info) {
++        if (pen_info != nullptr) {
++          pen_info->pressure = 720;
++          pen_info->rotation = 0;
++          pen_info->penFlags = 0;
++        }
++        return TRUE;
++      });
++
++  MockFlutterWindow win32window(100, 100, mock_proc_table);
++  MockWindowBindingHandlerDelegate delegate;
++  win32window.SetView(&delegate);
++
++  EXPECT_CALL(delegate,
++              OnPointerDown(10.0, 10.0, kFlutterPointerDeviceKindStylus,
++                            kDefaultPointerDeviceId,
++                            kFlutterPointerButtonStylusContact |
++                                kFlutterPointerButtonStylusPrimary,
++                            720, 0))
++      .Times(1);
++  EXPECT_CALL(delegate,
++              OnPointerMove(10.0, 10.0, kFlutterPointerDeviceKindStylus,
++                            kDefaultPointerDeviceId,
++                            kFlutterPointerButtonStylusContact, 0, 720, 0))
++      .Times(1);
++
++  UINT32 pointerId = 1;
++  WPARAM wparam = static_cast<WPARAM>(pointerId);
++  InjectPointerMessageWithClientPoint(win32window, WM_POINTERDOWN, wparam, 10,
++                                      10);
++  InjectPointerMessageWithClientPoint(win32window, WM_POINTERUPDATE, wparam, 10,
++                                      10);
++}
++
+ TEST_F(FlutterWindowTest, OnMousePointerDown) {
+   auto mock_proc_table = std::make_shared<MockWindowsProcTable>();
+ 
+diff --git a/engine/src/flutter/shell/platform/windows/flutter_windows_view.cc b/engine/src/flutter/shell/platform/windows/flutter_windows_view.cc
+index 5fa04fe1bf853..5885b38558a8d 100644
+--- a/engine/src/flutter/shell/platform/windows/flutter_windows_view.cc
++++ b/engine/src/flutter/shell/platform/windows/flutter_windows_view.cc
+@@ -264,42 +264,43 @@ void FlutterWindowsView::OnPointerMove(double x,
+                                        double y,
+                                        FlutterPointerDeviceKind device_kind,
+                                        int32_t device_id,
++                                       uint64_t buttons,
+                                        uint32_t rotation,
+                                        uint32_t pressure,
+                                        int modifiers_state) {
+   engine_->keyboard_key_handler()->SyncModifiersIfNeeded(modifiers_state);
+   auto state = GetOrCreatePointerState(device_kind, device_id);
++  state->buttons = buttons;
+   state->rotation = rotation;
+   state->pressure = pressure;
+   SendPointerMove(x, y, state);
+ }
+ 
+-void FlutterWindowsView::OnPointerDown(
+-    double x,
+-    double y,
+-    FlutterPointerDeviceKind device_kind,
+-    int32_t device_id,
+-    FlutterPointerMouseButtons flutter_button,
+-    uint32_t rotation,
+-    uint32_t pressure) {
+-  if (flutter_button != 0) {
++void FlutterWindowsView::OnPointerDown(double x,
++                                       double y,
++                                       FlutterPointerDeviceKind device_kind,
++                                       int32_t device_id,
++                                       uint64_t buttons,
++                                       uint32_t rotation,
++                                       uint32_t pressure) {
++  if (buttons != 0) {
+     auto state = GetOrCreatePointerState(device_kind, device_id);
+-    state->buttons |= flutter_button;
++    state->buttons |= buttons;
+     state->rotation = rotation;
+     state->pressure = pressure;
+     SendPointerDown(x, y, state);
+   }
+ }
+ 
+-void FlutterWindowsView::OnPointerUp(
+-    double x,
+-    double y,
+-    FlutterPointerDeviceKind device_kind,
+-    int32_t device_id,
+-    FlutterPointerMouseButtons flutter_button) {
+-  if (flutter_button != 0) {
+-    auto state = GetOrCreatePointerState(device_kind, device_id);
+-    state->buttons &= ~flutter_button;
++void FlutterWindowsView::OnPointerUp(double x,
++                                     double y,
++                                     FlutterPointerDeviceKind device_kind,
++                                     int32_t device_id,
++                                     uint64_t buttons) {
++  auto state = GetOrCreatePointerState(device_kind, device_id);
++  const uint64_t released_buttons = buttons == 0 ? state->buttons : buttons;
++  if (released_buttons != 0) {
++    state->buttons &= ~released_buttons;
+     SendPointerUp(x, y, state);
+   }
+ }
+diff --git a/engine/src/flutter/shell/platform/windows/flutter_windows_view.h b/engine/src/flutter/shell/platform/windows/flutter_windows_view.h
+index 2f68436bb0943..40a5e7626473b 100644
+--- a/engine/src/flutter/shell/platform/windows/flutter_windows_view.h
++++ b/engine/src/flutter/shell/platform/windows/flutter_windows_view.h
+@@ -158,6 +158,7 @@ class FlutterWindowsView : public WindowBindingHandlerDelegate {
+                      double y,
+                      FlutterPointerDeviceKind device_kind,
+                      int32_t device_id,
++                     uint64_t buttons,
+                      uint32_t rotation,
+                      uint32_t pressure,
+                      int modifiers_state) override;
+@@ -167,7 +168,7 @@ class FlutterWindowsView : public WindowBindingHandlerDelegate {
+                      double y,
+                      FlutterPointerDeviceKind device_kind,
+                      int32_t device_id,
+-                     FlutterPointerMouseButtons button,
++                     uint64_t buttons,
+                      uint32_t rotation,
+                      uint32_t pressure) override;
+ 
+@@ -176,7 +177,7 @@ class FlutterWindowsView : public WindowBindingHandlerDelegate {
+                    double y,
+                    FlutterPointerDeviceKind device_kind,
+                    int32_t device_id,
+-                   FlutterPointerMouseButtons button) override;
++                   uint64_t buttons) override;
+ 
+   // |WindowBindingHandlerDelegate|
+   void OnPointerLeave(double x,
+diff --git a/engine/src/flutter/shell/platform/windows/testing/mock_window.h b/engine/src/flutter/shell/platform/windows/testing/mock_window.h
+index 654e9369cb0bc..6e73c681de2e1 100644
+--- a/engine/src/flutter/shell/platform/windows/testing/mock_window.h
++++ b/engine/src/flutter/shell/platform/windows/testing/mock_window.h
+@@ -44,6 +44,7 @@ class MockWindow : public FlutterWindow {
+                double,
+                FlutterPointerDeviceKind,
+                int32_t,
++               uint64_t,
+                uint32_t,
+                uint32_t,
+                int),
+@@ -54,13 +55,13 @@ class MockWindow : public FlutterWindow {
+                double,
+                FlutterPointerDeviceKind,
+                int32_t,
+-               UINT,
++               uint64_t,
+                uint32_t,
+                uint32_t),
+               (override));
+   MOCK_METHOD(void,
+               OnPointerUp,
+-              (double, double, FlutterPointerDeviceKind, int32_t, UINT),
++              (double, double, FlutterPointerDeviceKind, int32_t, uint64_t),
+               (override));
+   MOCK_METHOD(void,
+               OnPointerLeave,
+diff --git a/engine/src/flutter/shell/platform/windows/testing/mock_window_binding_handler_delegate.h b/engine/src/flutter/shell/platform/windows/testing/mock_window_binding_handler_delegate.h
+index 21e4764a29157..18a51852e584c 100644
+--- a/engine/src/flutter/shell/platform/windows/testing/mock_window_binding_handler_delegate.h
++++ b/engine/src/flutter/shell/platform/windows/testing/mock_window_binding_handler_delegate.h
+@@ -24,6 +24,7 @@ class MockWindowBindingHandlerDelegate : public WindowBindingHandlerDelegate {
+                double,
+                FlutterPointerDeviceKind,
+                int32_t,
++               uint64_t,
+                uint32_t,
+                uint32_t,
+                int),
+@@ -34,17 +35,13 @@ class MockWindowBindingHandlerDelegate : public WindowBindingHandlerDelegate {
+                double,
+                FlutterPointerDeviceKind,
+                int32_t,
+-               FlutterPointerMouseButtons,
++               uint64_t,
+                uint32_t,
+                uint32_t),
+               (override));
+   MOCK_METHOD(void,
+               OnPointerUp,
+-              (double,
+-               double,
+-               FlutterPointerDeviceKind,
+-               int32_t,
+-               FlutterPointerMouseButtons),
++              (double, double, FlutterPointerDeviceKind, int32_t, uint64_t),
+               (override));
+   MOCK_METHOD(void,
+               OnPointerLeave,
+diff --git a/engine/src/flutter/shell/platform/windows/window_binding_handler_delegate.h b/engine/src/flutter/shell/platform/windows/window_binding_handler_delegate.h
+index 84db4132f68ea..1b471ab9bb416 100644
+--- a/engine/src/flutter/shell/platform/windows/window_binding_handler_delegate.h
++++ b/engine/src/flutter/shell/platform/windows/window_binding_handler_delegate.h
+@@ -37,6 +37,7 @@ class WindowBindingHandlerDelegate {
+                              double y,
+                              FlutterPointerDeviceKind device_kind,
+                              int32_t device_id,
++                             uint64_t buttons,
+                              uint32_t rotation,
+                              uint32_t pressure,
+                              int modifiers_state) = 0;
+@@ -47,7 +48,7 @@ class WindowBindingHandlerDelegate {
+                              double y,
+                              FlutterPointerDeviceKind device_kind,
+                              int32_t device_id,
+-                             FlutterPointerMouseButtons button,
++                             uint64_t buttons,
+                              uint32_t rotation,
+                              uint32_t pressure) = 0;
+ 
+@@ -57,7 +58,7 @@ class WindowBindingHandlerDelegate {
+                            double y,
+                            FlutterPointerDeviceKind device_kind,
+                            int32_t device_id,
+-                           FlutterPointerMouseButtons button) = 0;
++                           uint64_t buttons) = 0;
+ 
+   // Notifies delegate that backing window mouse pointer has left the window.
+   // Typically called by currently configured WindowBindingHandler.
+diff --git a/engine/src/flutter/shell/platform/windows/window_unittests.cc b/engine/src/flutter/shell/platform/windows/window_unittests.cc
+index 95fb3f3500475..ad868a2a196d1 100644
+--- a/engine/src/flutter/shell/platform/windows/window_unittests.cc
++++ b/engine/src/flutter/shell/platform/windows/window_unittests.cc
+@@ -227,8 +227,9 @@ TEST(MockWindow, MouseLeave) {
+   const double mouse_x = 10.0;
+   const double mouse_y = 20.0;
+ 
+-  EXPECT_CALL(window, OnPointerMove(mouse_x, mouse_y,
+-                                    kFlutterPointerDeviceKindMouse, 0, 0, 0, 0))
++  EXPECT_CALL(window,
++              OnPointerMove(mouse_x, mouse_y, kFlutterPointerDeviceKindMouse, 0,
++                            0, 0, 0, 0))
+       .Times(1);
+   EXPECT_CALL(window, OnPointerLeave(mouse_x, mouse_y,
+                                      kFlutterPointerDeviceKindMouse, 0))
+
+From 33d88b58f40897072768a8991bf659b011adbfa1 Mon Sep 17 00:00:00 2001
+From: CodeDoctorDE <codedoctor@linwood.dev>
+Date: Fri, 5 Jun 2026 09:56:12 +0200
+Subject: [PATCH 2/2] Fix broken windows pointer test
+
+---
+ .../platform/windows/flutter_window_unittests.cc     | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/engine/src/flutter/shell/platform/windows/flutter_window_unittests.cc b/engine/src/flutter/shell/platform/windows/flutter_window_unittests.cc
+index a16e69ae6695e..a43385e804980 100644
+--- a/engine/src/flutter/shell/platform/windows/flutter_window_unittests.cc
++++ b/engine/src/flutter/shell/platform/windows/flutter_window_unittests.cc
+@@ -831,7 +831,9 @@ TEST_F(FlutterWindowTest, OnMousePointerDown) {
+         if (pointer_info != nullptr) {
+           pointer_info->pointerType = PT_MOUSE;
+           pointer_info->pointerId = pointer_id;
+-          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT;
++          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT |
++                                       POINTER_FLAG_FIRSTBUTTON |
++                                       POINTER_FLAG_DOWN;
+         }
+         return TRUE;
+       });
+@@ -859,7 +861,9 @@ TEST_F(FlutterWindowTest, OnTouchPointerDown) {
+         if (pointer_info != nullptr) {
+           pointer_info->pointerType = PT_TOUCH;
+           pointer_info->pointerId = pointer_id;
+-          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT;
++          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT |
++                                       POINTER_FLAG_FIRSTBUTTON |
++                                       POINTER_FLAG_DOWN;
+         }
+         return TRUE;
+       });
+@@ -890,7 +894,9 @@ TEST_F(FlutterWindowTest, PointerMessageScreenCoordinatesAreConvertedToClient) {
+         if (pointer_info != nullptr) {
+           pointer_info->pointerType = PT_TOUCH;
+           pointer_info->pointerId = pointer_id;
+-          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT;
++          pointer_info->pointerFlags = POINTER_FLAG_INCONTACT |
++                                       POINTER_FLAG_FIRSTBUTTON |
++                                       POINTER_FLAG_DOWN;
+         }
+         return TRUE;
+       });

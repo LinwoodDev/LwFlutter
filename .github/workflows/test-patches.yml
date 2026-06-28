@@ -1,0 +1,49 @@
+name: Test patches
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'flutter.version'
+      - 'patches/**'
+      - 'scripts/**'
+      - '.github/workflows/test-patches.yml'
+  workflow_dispatch:
+    inputs:
+      flutter_ref:
+        description: Optional Flutter ref/tag/SHA to test instead of flutter.version.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  apply-patches:
+    name: Apply patches to Flutter
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout LwFlutter
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq p7zip-full
+
+      - name: Test patch application
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref='${{ inputs.flutter_ref }}'
+          if [ -n "$ref" ]; then
+            scripts/test_patches_locally.sh --flutter-ref "$ref"
+          else
+            scripts/test_patches_locally.sh
+          fi

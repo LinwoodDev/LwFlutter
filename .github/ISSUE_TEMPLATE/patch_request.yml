@@ -1,0 +1,52 @@
+name: Patch request
+description: Suggest a Flutter patch to carry temporarily in LwFlutter.
+title: "[Patch request]: "
+labels:
+  - patch request
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this only for patches that Linwood should temporarily carry on top of official Flutter. General Flutter bugs should be reported upstream first.
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: This request is specifically about carrying a temporary LwFlutter patch.
+          required: true
+        - label: I checked whether the issue exists on the matching official Flutter version.
+          required: true
+        - label: I understand that broadly applicable Flutter bugs should usually be fixed upstream.
+          required: true
+  - type: input
+    id: upstream_pr_or_issue
+    attributes:
+      label: Upstream Flutter PR or issue
+      placeholder: https://github.com/flutter/flutter/pull/...
+    validations:
+      required: true
+  - type: dropdown
+    id: patch_area
+    attributes:
+      label: Patch area
+      options:
+        - common
+        - windows
+        - linux
+    validations:
+      required: true
+  - type: textarea
+    id: reason
+    attributes:
+      label: Why should LwFlutter carry this?
+      placeholder: Explain why this patch is needed before it is available in official Flutter.
+    validations:
+      required: true
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing notes
+      placeholder: Describe how this was tested against official Flutter and patched Flutter.
+    validations:
+      required: false

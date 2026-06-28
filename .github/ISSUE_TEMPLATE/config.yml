@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Flutter upstream issue tracker
+    url: https://github.com/flutter/flutter/issues
+    about: Use this if the problem also happens on the matching official Flutter version.
+  - name: Linwood Butterfly issue tracker
+    url: https://github.com/LinwoodDev/Butterfly/issues
+    about: Use this for Butterfly bugs that are not caused by LwFlutter patches.

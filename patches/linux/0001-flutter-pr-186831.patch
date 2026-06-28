@@ -1,0 +1,460 @@
+From 3cd0d1d9ea9d61e618a5a4f88ec133ce94cb2b0e Mon Sep 17 00:00:00 2001
+From: CodeDoctorDE <codedoctor@linwood.dev>
+Date: Wed, 20 May 2026 22:56:24 +0200
+Subject: [PATCH] Add linux stylus pressure and rotation support
+
+---
+ engine/src/flutter/shell/platform/linux/fl_engine.cc      | 13 ++++-
+ engine/src/flutter/shell/platform/linux/fl_engine_private.h |  5 +-
+ engine/src/flutter/shell/platform/linux/fl_pointer_manager.cc | 65 ++++++++++++++++------
+ engine/src/flutter/shell/platform/linux/fl_pointer_manager.h  | 32 +++++++++--
+ engine/src/flutter/shell/platform/linux/fl_scrolling_manager.cc |  2 +-
+ engine/src/flutter/shell/platform/linux/fl_view.cc         | 25 +++++++--
+ 6 files changed, 112 insertions(+), 30 deletions(-)
+
+diff --git a/engine/src/flutter/shell/platform/linux/fl_engine.cc b/engine/src/flutter/shell/platform/linux/fl_engine.cc
+index 6ccdc39d..8002c324 100644
+--- a/engine/src/flutter/shell/platform/linux/fl_engine.cc
++++ b/engine/src/flutter/shell/platform/linux/fl_engine.cc
+@@ -1182,7 +1182,8 @@ void fl_engine_send_mouse_pointer_event(FlEngine* self,
+                                         FlutterPointerDeviceKind device_kind,
+                                         double scroll_delta_x,
+                                         double scroll_delta_y,
+-                                        int64_t buttons) {
++                                        int64_t buttons,
++                                        FlPointerDeviceState device_state) {
+   g_return_if_fail(FL_IS_ENGINE(self));
+ 
+   if (self->engine == nullptr) {
+@@ -1204,6 +1205,16 @@ void fl_engine_send_mouse_pointer_event(FlEngine* self,
+   fl_event.buttons = buttons;
+   fl_event.device = kMousePointerDeviceId;
+   fl_event.view_id = view_id;
++  // GDK reports tablet pressure through GDK_AXIS_PRESSURE. The GDK input
++  // device documentation defines pressure as normalized from 0.0 to 1.0,
++  // which matches Flutter's expected pressure range.
++  // See: https://refspecs.linuxbase.org/gtk/2.6/gdk/gdk-Input-Devices.html
++  fl_event.pressure = device_state.pressure;
++  fl_event.pressure_min = 0.0;
++  fl_event.pressure_max = 1.0;
++  // GTK reports rotation in degrees, so convert it to radians for
++  // FlutterPointerEvent.rotation.
++  fl_event.rotation = device_state.rotation * G_PI / 180.0;
+   if (self->embedder_api.SendPointerEvent(self->engine, &fl_event, 1) !=
+       kSuccess) {
+     g_warning("Failed to send pointer event");
+diff --git a/engine/src/flutter/shell/platform/linux/fl_engine_private.h b/engine/src/flutter/shell/platform/linux/fl_engine_private.h
+index 4b54b8ec..47b86700 100644
+--- a/engine/src/flutter/shell/platform/linux/fl_engine_private.h
++++ b/engine/src/flutter/shell/platform/linux/fl_engine_private.h
+@@ -13,6 +13,7 @@
+ #include "flutter/shell/platform/linux/fl_mouse_cursor_handler.h"
+ #include "flutter/shell/platform/linux/fl_opengl_manager.h"
+ #include "flutter/shell/platform/linux/fl_renderable.h"
++#include "flutter/shell/platform/linux/fl_pointer_manager.h"
+ #include "flutter/shell/platform/linux/fl_task_runner.h"
+ #include "flutter/shell/platform/linux/fl_text_input_handler.h"
+ #include "flutter/shell/platform/linux/public/flutter_linux/fl_dart_project.h"
+@@ -283,6 +284,7 @@ void fl_engine_send_window_metrics_event(FlEngine* engine,
+  * @scroll_delta_x: x offset of scroll.
+  * @scroll_delta_y: y offset of scroll.
+  * @buttons: buttons that are pressed.
++ * @device_state: state of the pointer device.
+  *
+  * Sends a mouse pointer event to the engine.
+  */
+@@ -295,7 +297,8 @@ void fl_engine_send_mouse_pointer_event(FlEngine* engine,
+                                         FlutterPointerDeviceKind device_kind,
+                                         double scroll_delta_x,
+                                         double scroll_delta_y,
+-                                        int64_t buttons);
++                                        int64_t buttons,
++                                        FlPointerDeviceState device_state);
+ 
+ /**
+  * fl_engine_send_touch_up_event:
+diff --git a/engine/src/flutter/shell/platform/linux/fl_pointer_manager.cc b/engine/src/flutter/shell/platform/linux/fl_pointer_manager.cc
+index 7d63e48d..4574e780 100644
+--- a/engine/src/flutter/shell/platform/linux/fl_pointer_manager.cc
++++ b/engine/src/flutter/shell/platform/linux/fl_pointer_manager.cc
+@@ -33,6 +33,10 @@ static constexpr guint kMouseButtonBack = 8;
+ // 9 corresponds to mouse forward button on both x11 and wayland
+ static constexpr guint kMouseButtonForward = 9;
+ 
++static constexpr int64_t kFlutterPointerButtonStylusContact = 1 << 0;
++static constexpr int64_t kFlutterPointerButtonStylusPrimary = 1 << 1;
++static constexpr int64_t kFlutterPointerButtonStylusSecondary = 1 << 2;
++
+ // Convert a GDK button ID into a Flutter button ID
+ static gboolean get_mouse_button(guint gdk_button, int64_t* button) {
+   switch (gdk_button) {
+@@ -56,12 +60,36 @@ static gboolean get_mouse_button(guint gdk_button, int64_t* button) {
+   }
+ }
+ 
++static gboolean get_button(FlutterPointerDeviceKind device_kind,
++                           guint gdk_button,
++                           int64_t* button) {
++  if (device_kind == kFlutterPointerDeviceKindStylus ||
++      device_kind == kFlutterPointerDeviceKindInvertedStylus) {
++    switch (gdk_button) {
++      case GDK_BUTTON_PRIMARY:
++        *button = kFlutterPointerButtonStylusContact;
++        return TRUE;
++      case GDK_BUTTON_SECONDARY:
++        *button = kFlutterPointerButtonStylusPrimary;
++        return TRUE;
++      case GDK_BUTTON_MIDDLE:
++        *button = kFlutterPointerButtonStylusSecondary;
++        return TRUE;
++      default:
++        return FALSE;
++    }
++  }
++
++  return get_mouse_button(gdk_button, button);
++}
++
+ // Generates a mouse pointer event if the pointer appears inside the window.
+ static void ensure_pointer_added(FlPointerManager* self,
+                                  guint event_time,
+                                  FlutterPointerDeviceKind device_kind,
+                                  gdouble x,
+-                                 gdouble y) {
++                                 gdouble y,
++                                 FlPointerDeviceState device_state) {
+   if (self->pointer_inside) {
+     return;
+   }
+@@ -74,7 +102,7 @@ static void ensure_pointer_added(FlPointerManager* self,
+ 
+   fl_engine_send_mouse_pointer_event(
+       engine, self->view_id, kAdd, event_time * kMicrosecondsPerMillisecond, x,
+-      y, device_kind, 0, 0, self->button_state);
++      y, device_kind, 0, 0, self->button_state, device_state);
+ }
+ 
+ static void fl_pointer_manager_dispose(GObject* object) {
+@@ -108,15 +136,16 @@ gboolean fl_pointer_manager_handle_button_press(
+     FlutterPointerDeviceKind device_kind,
+     gdouble x,
+     gdouble y,
+-    guint gdk_button) {
++    guint gdk_button,
++    FlPointerDeviceState device_state) {
+   g_return_val_if_fail(FL_IS_POINTER_MANAGER(self), FALSE);
+ 
+   int64_t button;
+-  if (!get_mouse_button(gdk_button, &button)) {
++  if (!get_button(device_kind, gdk_button, &button)) {
+     return FALSE;
+   }
+ 
+-  ensure_pointer_added(self, event_time, device_kind, x, y);
++  ensure_pointer_added(self, event_time, device_kind, x, y, device_state);
+ 
+   // Drop the event if Flutter already thinks the button is down.
+   if ((self->button_state & button) != 0) {
+@@ -135,7 +164,7 @@ gboolean fl_pointer_manager_handle_button_press(
+ 
+   fl_engine_send_mouse_pointer_event(
+       engine, self->view_id, phase, event_time * kMicrosecondsPerMillisecond, x,
+-      y, device_kind, 0, 0, self->button_state);
++      y, device_kind, 0, 0, self->button_state, device_state);
+ 
+   return TRUE;
+ }
+@@ -146,11 +175,12 @@ gboolean fl_pointer_manager_handle_button_release(
+     FlutterPointerDeviceKind device_kind,
+     gdouble x,
+     gdouble y,
+-    guint gdk_button) {
++    guint gdk_button,
++    FlPointerDeviceState device_state) {
+   g_return_val_if_fail(FL_IS_POINTER_MANAGER(self), FALSE);
+ 
+   int64_t button;
+-  if (!get_mouse_button(gdk_button, &button)) {
++  if (!get_button(device_kind, gdk_button, &button)) {
+     return FALSE;
+   }
+ 
+@@ -171,7 +201,7 @@ gboolean fl_pointer_manager_handle_button_release(
+ 
+   fl_engine_send_mouse_pointer_event(
+       engine, self->view_id, phase, event_time * kMicrosecondsPerMillisecond, x,
+-      y, device_kind, 0, 0, self->button_state);
++      y, device_kind, 0, 0, self->button_state, device_state);
+ 
+   return TRUE;
+ }
+@@ -180,7 +210,8 @@ gboolean fl_pointer_manager_handle_motion(FlPointerManager* self,
+                                           guint event_time,
+                                           FlutterPointerDeviceKind device_kind,
+                                           gdouble x,
+-                                          gdouble y) {
++                                          gdouble y,
++                                          FlPointerDeviceState device_state) {
+   g_return_val_if_fail(FL_IS_POINTER_MANAGER(self), FALSE);
+ 
+   g_autoptr(FlEngine) engine = FL_ENGINE(g_weak_ref_get(&self->engine));
+@@ -188,12 +219,12 @@ gboolean fl_pointer_manager_handle_motion(FlPointerManager* self,
+     return FALSE;
+   }
+ 
+-  ensure_pointer_added(self, event_time, device_kind, x, y);
++  ensure_pointer_added(self, event_time, device_kind, x, y, device_state);
+ 
+   fl_engine_send_mouse_pointer_event(
+       engine, self->view_id, self->button_state != 0 ? kMove : kHover,
+       event_time * kMicrosecondsPerMillisecond, x, y, device_kind, 0, 0,
+-      self->button_state);
++      self->button_state, device_state);
+ 
+   return TRUE;
+ }
+@@ -202,7 +233,8 @@ gboolean fl_pointer_manager_handle_enter(FlPointerManager* self,
+                                          guint event_time,
+                                          FlutterPointerDeviceKind device_kind,
+                                          gdouble x,
+-                                         gdouble y) {
++                                         gdouble y,
++                                         FlPointerDeviceState device_state) {
+   g_return_val_if_fail(FL_IS_POINTER_MANAGER(self), FALSE);
+ 
+   g_autoptr(FlEngine) engine = FL_ENGINE(g_weak_ref_get(&self->engine));
+@@ -210,7 +242,7 @@ gboolean fl_pointer_manager_handle_enter(FlPointerManager* self,
+     return FALSE;
+   }
+ 
+-  ensure_pointer_added(self, event_time, device_kind, x, y);
++  ensure_pointer_added(self, event_time, device_kind, x, y, device_state);
+ 
+   return TRUE;
+ }
+@@ -219,7 +251,8 @@ gboolean fl_pointer_manager_handle_leave(FlPointerManager* self,
+                                          guint event_time,
+                                          FlutterPointerDeviceKind device_kind,
+                                          gdouble x,
+-                                         gdouble y) {
++                                         gdouble y,
++                                         FlPointerDeviceState device_state) {
+   g_return_val_if_fail(FL_IS_POINTER_MANAGER(self), FALSE);
+ 
+   g_autoptr(FlEngine) engine = FL_ENGINE(g_weak_ref_get(&self->engine));
+@@ -234,7 +267,7 @@ gboolean fl_pointer_manager_handle_leave(FlPointerManager* self,
+     fl_engine_send_mouse_pointer_event(engine, self->view_id, kRemove,
+                                        event_time * kMicrosecondsPerMillisecond,
+                                        x, y, device_kind, 0, 0,
+-                                       self->button_state);
++                                       self->button_state, device_state);
+     self->pointer_inside = FALSE;
+   }
+ 
+diff --git a/engine/src/flutter/shell/platform/linux/fl_pointer_manager.h b/engine/src/flutter/shell/platform/linux/fl_pointer_manager.h
+index c6f5604c..68df6227 100644
+--- a/engine/src/flutter/shell/platform/linux/fl_pointer_manager.h
++++ b/engine/src/flutter/shell/platform/linux/fl_pointer_manager.h
+@@ -16,6 +16,18 @@ G_DECLARE_FINAL_TYPE(FlPointerManager,
+                      POINTER_MANAGER,
+                      GObject);
+ 
++/**
++ * FlPointerDeviceState:
++ * @pressure: the pressure of the device.
++ * @rotation: the rotation of the device.
++ *
++ * A structure representing the state of a pointer device.
++ */
++typedef struct {
++  double pressure;
++  double rotation;
++} FlPointerDeviceState;
++
+ /**
+  * fl_pointer_manager_new:
+  * @view_id: view ID to report events for.
+@@ -36,6 +48,7 @@ FlPointerManager* fl_pointer_manager_new(FlutterViewId view_id,
+  * @x: x co-ordinate of event.
+  * @y: y co-ordinate of event.
+  * @gdk_button: button being pressed.
++ * @device_state: state of the pointer device.
+  *
+  * Returns %TRUE if this event was handled.
+  */
+@@ -45,7 +58,8 @@ gboolean fl_pointer_manager_handle_button_press(
+     FlutterPointerDeviceKind device_kind,
+     gdouble x,
+     gdouble y,
+-    guint gdk_button);
++    guint gdk_button,
++    FlPointerDeviceState device_state);
+ 
+ /**
+  * fl_pointer_manager_handle_button_release:
+@@ -55,6 +69,7 @@ gboolean fl_pointer_manager_handle_button_press(
+  * @x: x co-ordinate of event.
+  * @y: y co-ordinate of event.
+  * @gdk_button: button being released.
++ * @device_state: state of the pointer device.
+  *
+  * Returns %TRUE if this event was handled.
+  */
+@@ -64,7 +79,8 @@ gboolean fl_pointer_manager_handle_button_release(
+     FlutterPointerDeviceKind device_kind,
+     gdouble x,
+     gdouble y,
+-    guint gdk_button);
++    guint gdk_button,
++    FlPointerDeviceState device_state);
+ 
+ /**
+  * fl_pointer_manager_handle_motion:
+@@ -73,6 +89,7 @@ gboolean fl_pointer_manager_handle_button_release(
+  * @device_kind: kind of device generating the event.
+  * @x: x co-ordinate of event.
+  * @y: y co-ordinate of event.
++ * @device_state: state of the pointer device.
+  *
+  * Returns %TRUE if this event was handled.
+  */
+@@ -80,7 +97,8 @@ gboolean fl_pointer_manager_handle_motion(FlPointerManager* manager,
+                                           guint event_time,
+                                           FlutterPointerDeviceKind device_kind,
+                                           gdouble x,
+-                                          gdouble y);
++                                          gdouble y,
++                                          FlPointerDeviceState device_state);
+ 
+ /**
+  * fl_pointer_manager_handle_enter:
+@@ -89,6 +107,7 @@ gboolean fl_pointer_manager_handle_motion(FlPointerManager* manager,
+  * @device_kind: kind of device generating the event.
+  * @x: x co-ordinate of event.
+  * @y: y co-ordinate of event.
++ * @device_state: state of the pointer device.
+  *
+  * Returns %TRUE if this event was handled.
+  */
+@@ -96,7 +115,8 @@ gboolean fl_pointer_manager_handle_enter(FlPointerManager* manager,
+                                          guint event_time,
+                                          FlutterPointerDeviceKind device_kind,
+                                          gdouble x,
+-                                         gdouble y);
++                                         gdouble y,
++                                         FlPointerDeviceState device_state);
+ 
+ /**
+  * fl_pointer_manager_handle_leave:
+@@ -105,6 +125,7 @@ gboolean fl_pointer_manager_handle_enter(FlPointerManager* manager,
+  * @device_kind: kind of device generating the event.
+  * @x: x co-ordinate of event.
+  * @y: y co-ordinate of event.
++ * @device_state: state of the pointer device.
+  *
+  * Returns %TRUE if this event was handled.
+  */
+@@ -112,7 +133,8 @@ gboolean fl_pointer_manager_handle_leave(FlPointerManager* manager,
+                                          guint event_time,
+                                          FlutterPointerDeviceKind device_kind,
+                                          gdouble x,
+-                                         gdouble y);
++                                         gdouble y,
++                                         FlPointerDeviceState device_state);
+ G_END_DECLS
+ 
+ #endif  // FLUTTER_SHELL_PLATFORM_LINUX_FL_POINTER_MANAGER_H_
+diff --git a/engine/src/flutter/shell/platform/linux/fl_scrolling_manager.cc b/engine/src/flutter/shell/platform/linux/fl_scrolling_manager.cc
+index cb2b3b65..be8bd759 100644
+--- a/engine/src/flutter/shell/platform/linux/fl_scrolling_manager.cc
++++ b/engine/src/flutter/shell/platform/linux/fl_scrolling_manager.cc
+@@ -147,7 +147,7 @@ void fl_scrolling_manager_handle_scroll_event(FlScrollingManager* self,
+         ,
+         event_time * kMicrosecondsPerMillisecond, event_x * scale_factor,
+         event_y * scale_factor, kFlutterPointerDeviceKindMouse, scroll_delta_x,
+-        scroll_delta_y, 0);
++        scroll_delta_y, 0, {});
+   }
+ }
+ 
+diff --git a/engine/src/flutter/shell/platform/linux/fl_view.cc b/engine/src/flutter/shell/platform/linux/fl_view.cc
+index f7d0706d..b67e3312 100644
+--- a/engine/src/flutter/shell/platform/linux/fl_view.cc
++++ b/engine/src/flutter/shell/platform/linux/fl_view.cc
+@@ -168,10 +168,11 @@ static FlutterPointerDeviceKind get_pointer_device_kind(GdkEvent* event) {
+   GdkInputSource source = gdk_device_get_source(device);
+   switch (source) {
+     case GDK_SOURCE_PEN:
+-    case GDK_SOURCE_ERASER:
+     case GDK_SOURCE_CURSOR:
+     case GDK_SOURCE_TABLET_PAD:
+       return kFlutterPointerDeviceKindStylus;
++    case GDK_SOURCE_ERASER:
++      return kFlutterPointerDeviceKindInvertedStylus;
+     case GDK_SOURCE_TOUCHSCREEN:
+       return kFlutterPointerDeviceKindTouch;
+     case GDK_SOURCE_TOUCHPAD:  // trackpad device type is reserved for gestures
+@@ -182,6 +183,15 @@ static FlutterPointerDeviceKind get_pointer_device_kind(GdkEvent* event) {
+   }
+ }
+ 
++// Gets the pointer state for a GDK event
++static FlPointerDeviceState get_pointer_device_state(GdkEvent* event) {
++  FlPointerDeviceState state = {};
++
++  gdk_event_get_axis(event, GDK_AXIS_PRESSURE, &state.pressure);
++  gdk_event_get_axis(event, GDK_AXIS_ROTATION, &state.rotation);
++  return state;
++}
++
+ // Called when the mouse cursor changes.
+ static void cursor_changed_cb(FlView* self) {
+   FlMouseCursorHandler* handler =
+@@ -352,7 +362,7 @@ static gboolean button_press_event_cb(FlView* self,
+   return fl_pointer_manager_handle_button_press(
+       self->pointer_manager, gdk_event_get_time(event),
+       get_pointer_device_kind(event), x * scale_factor, y * scale_factor,
+-      button);
++      button, get_pointer_device_state(event));
+ }
+ 
+ // Signal handler for GtkWidget::button-release-event
+@@ -373,7 +383,7 @@ static gboolean button_release_event_cb(FlView* self,
+   return fl_pointer_manager_handle_button_release(
+       self->pointer_manager, gdk_event_get_time(event),
+       get_pointer_device_kind(event), x * scale_factor, y * scale_factor,
+-      button);
++      button, get_pointer_device_state(event));
+ }
+ 
+ // Signal handler for GtkWidget::scroll-event
+@@ -412,7 +422,8 @@ static gboolean motion_notify_event_cb(FlView* self,
+   gint scale_factor = gtk_widget_get_scale_factor(GTK_WIDGET(self));
+   return fl_pointer_manager_handle_motion(
+       self->pointer_manager, gdk_event_get_time(event),
+-      get_pointer_device_kind(event), x * scale_factor, y * scale_factor);
++      get_pointer_device_kind(event), x * scale_factor, y * scale_factor,
++      get_pointer_device_state(event));
+ }
+ 
+ // Signal handler for GtkWidget::enter-notify-event
+@@ -424,7 +435,8 @@ static gboolean enter_notify_event_cb(FlView* self,
+   gint scale_factor = gtk_widget_get_scale_factor(GTK_WIDGET(self));
+   return fl_pointer_manager_handle_enter(
+       self->pointer_manager, gdk_event_get_time(event),
+-      get_pointer_device_kind(event), x * scale_factor, y * scale_factor);
++      get_pointer_device_kind(event), x * scale_factor, y * scale_factor,
++      get_pointer_device_state(event));
+ }
+ 
+ // Signal handler for GtkWidget::leave-notify-event
+@@ -440,7 +452,8 @@ static gboolean leave_notify_event_cb(FlView* self,
+   gint scale_factor = gtk_widget_get_scale_factor(GTK_WIDGET(self));
+   return fl_pointer_manager_handle_leave(
+       self->pointer_manager, gdk_event_get_time(event),
+-      get_pointer_device_kind(event), x * scale_factor, y * scale_factor);
++      get_pointer_device_kind(event), x * scale_factor, y * scale_factor,
++      get_pointer_device_state(event));
+ }
+ 
+ static void gesture_rotation_begin_cb(FlView* self) {

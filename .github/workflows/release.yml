@@ -7,8 +7,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag, for example v3.35.7-lw.1
-        required: true
+        description: Optional release tag. If empty, the next v<flutter.version>-lw.N tag is generated.
+        required: false
+        default: ''
+        type: string
+      flutter_ref:
+        description: Optional Flutter ref/tag/SHA to release against. If empty, flutter.version is used.
+        required: false
+        default: ''
         type: string
       build_windows_engine:
         description: Force-build Windows engine artifact
@@ -41,16 +47,47 @@ jobs:
       - name: Resolve metadata
         id: meta
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="${{ inputs.tag }}"
+          input_ref='${{ inputs.flutter_ref }}'
+          if [ -n "$input_ref" ]; then
+            flutter_ref="$input_ref"
           else
-            tag="$GITHUB_REF_NAME"
+            flutter_ref="$(head -n 1 flutter.version | tr -d '[:space:]')"
           fi
 
-          flutter_ref="$(head -n 1 flutter.version | tr -d '[:space:]')"
+          if [ -z "$flutter_ref" ]; then
+            echo "::error::Flutter ref is empty"
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="$GITHUB_REF_NAME"
+          elif [ -n "${{ inputs.tag }}" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            prefix="v${flutter_ref}-lw."
+            latest="$(gh release list \
+              --repo "$GITHUB_REPOSITORY" \
+              --limit 100 \
+              --json tagName \
+              --jq ".[].tagName | select(startswith(\"$prefix\"))" \
+              | sed "s/^${prefix//./\\.}//" \
+              | grep -E '^[0-9]+$' \
+              | sort -nr \
+              | head -n 1 || true)"
+
+            if [ -z "$latest" ]; then
+              next=1
+            else
+              next=$((latest + 1))
+            fi
+
+            tag="${prefix}${next}"
+          fi
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "flutter_ref=$flutter_ref" >> "$GITHUB_OUTPUT"
@@ -88,7 +125,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           items=()
 
           if [ "${{ steps.detect.outputs.has_windows_engine }}" = "true" ]; then
@@ -102,7 +138,7 @@ jobs:
           if [ ${#items[@]} -eq 0 ]; then
             echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
           else
-            json=$(printf '%s\n' "${items[@]}" | jq -s -c '{include: .}')
+            json="$(printf '%s\n' "${items[@]}" | jq -s -c '{include: .}')"
             echo "matrix=$json" >> "$GITHUB_OUTPUT"
           fi
 
@@ -112,13 +148,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-
           tag="${{ steps.meta.outputs.tag }}"
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release edit "$tag" \
-              --title "LwFlutter $tag" \
-              --prerelease
+            gh release edit "$tag" --title "LwFlutter $tag" --prerelease
           else
             gh release create "$tag" \
               --title "LwFlutter $tag" \
@@ -134,11 +167,26 @@ jobs:
       - name: Checkout LwFlutter
         uses: actions/checkout@v4
 
+      - name: Materialize patch sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/materialize_patches.sh patches materialized-patches
+
+      - name: Test patches apply
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/test_patches_locally.sh --flutter-ref '${{ needs.prepare.outputs.flutter_ref }}' --patch-root materialized-patches
+
       - name: Create patches archive
         shell: bash
         run: |
           set -euo pipefail
-          7z a "$GITHUB_WORKSPACE/lwflutter-patches.zip" patches flutter.version
+          mkdir -p archive/patches
+          cp -R materialized-patches/. archive/patches/
+          printf '%s\n' '${{ needs.prepare.outputs.flutter_ref }}' > archive/flutter.version
+          (cd archive && 7z a "$GITHUB_WORKSPACE/lwflutter-patches.zip" patches flutter.version)
 
       - name: Create manifest
         shell: bash
@@ -170,7 +218,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "${{ needs.prepare.outputs.tag }}" \
+          gh release upload '${{ needs.prepare.outputs.tag }}' \
             lwflutter-patches.zip \
             lwflutter-manifest.json \
             --clobber
@@ -201,13 +249,20 @@ jobs:
           ref: ${{ needs.prepare.outputs.flutter_ref }}
           path: flutter
 
+      - name: Materialize patch sources
+        shell: bash
+        working-directory: LwFlutter
+        run: |
+          set -euo pipefail
+          scripts/materialize_patches.sh patches ../materialized-patches
+
       - name: Apply LwFlutter patches
         shell: bash
         working-directory: flutter
         run: |
           set -euo pipefail
           shopt -s globstar nullglob
-          patches=(../LwFlutter/patches/**/*.patch)
+          patches=(../materialized-patches/**/*.patch)
 
           if [ ${#patches[@]} -eq 0 ]; then
             echo "No patches found."
@@ -216,7 +271,11 @@ jobs:
 
           for patch in "${patches[@]}"; do
             echo "Applying $patch"
-            git am --3way "$patch"
+            if grep -qE '^From [0-9a-f]{40} Mon Sep 17 00:00:00 2001$' "$patch"; then
+              git am --3way --keep-cr "$patch"
+            else
+              git apply --3way "$patch"
+            fi
           done
 
       - name: Add Flutter to PATH
@@ -227,8 +286,7 @@ jobs:
       - name: Warm Flutter cache
         shell: bash
         working-directory: flutter
-        run: |
-          flutter --version
+        run: flutter --version
 
       - name: Install depot_tools
         shell: bash
@@ -239,14 +297,12 @@ jobs:
       - name: Sync engine dependencies
         shell: bash
         working-directory: flutter
-        run: |
-          gclient sync
+        run: gclient sync
 
       - name: Build engine with engine_tool
         shell: bash
         working-directory: flutter/engine/src/flutter
-        run: |
-          dart tools/engine_tool/bin/et.dart build ${{ matrix.engine_out }}
+        run: dart tools/engine_tool/bin/et.dart build ${{ matrix.engine_out }}
 
       - name: Zip engine output
         shell: bash
@@ -261,6 +317,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "${{ needs.prepare.outputs.tag }}" \
-            "${{ matrix.asset }}" \
+          gh release upload '${{ needs.prepare.outputs.tag }}' \
+            '${{ matrix.asset }}' \
             --clobber
