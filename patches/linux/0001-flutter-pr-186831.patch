@@ -6,11 +6,11 @@ Subject: [PATCH] Add linux stylus pressure and rotation support
 ---
  engine/src/flutter/shell/platform/linux/fl_engine.cc      | 13 ++++-
  engine/src/flutter/shell/platform/linux/fl_engine_private.h |  5 +-
- engine/src/flutter/shell/platform/linux/fl_pointer_manager.cc | 65 ++++++++++++++++------
+ engine/src/flutter/shell/platform/linux/fl_pointer_manager.cc | 61 +++++++++++++++------
  engine/src/flutter/shell/platform/linux/fl_pointer_manager.h  | 32 +++++++++--
  engine/src/flutter/shell/platform/linux/fl_scrolling_manager.cc |  2 +-
  engine/src/flutter/shell/platform/linux/fl_view.cc         | 25 +++++++--
- 6 files changed, 112 insertions(+), 30 deletions(-)
+ 6 files changed, 108 insertions(+), 30 deletions(-)
 
 diff --git a/engine/src/flutter/shell/platform/linux/fl_engine.cc b/engine/src/flutter/shell/platform/linux/fl_engine.cc
 index 6ccdc39d..8002c324 100644
@@ -74,21 +74,10 @@ index 4b54b8ec..47b86700 100644
  /**
   * fl_engine_send_touch_up_event:
 diff --git a/engine/src/flutter/shell/platform/linux/fl_pointer_manager.cc b/engine/src/flutter/shell/platform/linux/fl_pointer_manager.cc
-index 7d63e48d..4574e780 100644
+index 7d63e48d..2a307067 100644
 --- a/engine/src/flutter/shell/platform/linux/fl_pointer_manager.cc
 +++ b/engine/src/flutter/shell/platform/linux/fl_pointer_manager.cc
-@@ -33,6 +33,10 @@ static constexpr guint kMouseButtonBack = 8;
- // 9 corresponds to mouse forward button on both x11 and wayland
- static constexpr guint kMouseButtonForward = 9;
- 
-+static constexpr int64_t kFlutterPointerButtonStylusContact = 1 << 0;
-+static constexpr int64_t kFlutterPointerButtonStylusPrimary = 1 << 1;
-+static constexpr int64_t kFlutterPointerButtonStylusSecondary = 1 << 2;
-+
- // Convert a GDK button ID into a Flutter button ID
- static gboolean get_mouse_button(guint gdk_button, int64_t* button) {
-   switch (gdk_button) {
-@@ -56,12 +60,36 @@ static gboolean get_mouse_button(guint gdk_button, int64_t* button) {
+@@ -56,12 +56,36 @@ static gboolean get_mouse_button(guint gdk_button, int64_t* button) {
    }
  }
  
