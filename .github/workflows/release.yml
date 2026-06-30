@@ -225,9 +225,19 @@ jobs:
         run: |
           set -euo pipefail
           gh release upload '${{ needs.prepare.outputs.tag }}' \
+            --repo "$GITHUB_REPOSITORY" \
             lwflutter-patches.zip \
             lwflutter-manifest.json \
             --clobber
+
+      - name: Upload patch workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lwflutter-patches-${{ needs.prepare.outputs.tag }}
+          path: |
+            lwflutter-patches.zip
+            lwflutter-manifest.json
+          if-no-files-found: error
 
   build-engine:
     needs:
@@ -401,6 +411,13 @@ jobs:
           cd flutter/engine/src/out
           7z a "$GITHUB_WORKSPACE/${{ matrix.asset }}" "${{ matrix.engine_out }}"
 
+      - name: Upload engine workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
       - name: Upload engine asset to release
         shell: bash
         env:
@@ -408,5 +425,6 @@ jobs:
         run: |
           set -euo pipefail
           gh release upload '${{ needs.prepare.outputs.tag }}' \
+            --repo "$GITHUB_REPOSITORY" \
             '${{ matrix.asset }}' \
             --clobber
